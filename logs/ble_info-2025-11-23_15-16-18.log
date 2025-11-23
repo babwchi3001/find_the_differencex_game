@@ -1,0 +1,31 @@
+23-Nov-25 15:16:18: root - INFO - No BLE address provided, will search for device...
+23-Nov-25 15:16:18: root - INFO - [BLE]: BLE client initiliazed
+23-Nov-25 15:16:23: root - INFO - [BLE]: One IGEB device found, assinging address D9:23:64:C0:46:A9
+23-Nov-25 15:16:23: root - INFO - [BLE]: Received address as D9:23:64:C0:46:A9
+23-Nov-25 15:16:23: root - INFO - [CLIENT]: Recording timer set to: 36000 seconds
+23-Nov-25 15:16:23: root - INFO - [CLIENT]: Start recording
+23-Nov-25 15:16:23: root - INFO - [CLIENT] Recording ID: py-3fc5b3d3-e382-496b-93c1-b49c1291017e
+23-Nov-25 15:16:23: root - INFO - [CLIENT] Experiment description: EyeTracker
+23-Nov-25 15:16:23: root - INFO - [BLE]: Trying to connect to D9:23:64:C0:46:A9.....
+23-Nov-25 15:16:25: root - INFO - [BLE]: Searching for MAC address
+23-Nov-25 15:16:26: root - INFO - [BLE] Device ID (based on MAC address is): D9-23-64-C0-46-A9
+23-Nov-25 15:16:26: root - INFO - [BLE]: Firmware version: 1.0.0
+23-Nov-25 15:16:26: root - INFO - [BLE]: Connected to D9:23:64:C0:46:A9
+23-Nov-25 15:16:26: root - INFO - [BLE]: Current Device Status=1
+23-Nov-25 15:16:26: root - INFO - [BLE]: Connection: True
+23-Nov-25 15:16:26: root - INFO - [BLE]: Initialize: False
+23-Nov-25 15:16:26: root - INFO - [BLE]: Device connected
+23-Nov-25 15:16:26: root - INFO - [BLE]: Sending start commands
+23-Nov-25 15:16:26: root - INFO - [BLE]: Subscribing EEG notification
+23-Nov-25 15:16:27: root - INFO - [BLE]: Subscribing battery notification
+23-Nov-25 15:16:29: root - INFO - [BLE]: Recording successfully started
+23-Nov-25 15:16:38: root - INFO - [BLE]: KeyboardInterrupt applied, terminating...
+23-Nov-25 15:16:38: root - INFO - [BLE]: Sending stop signal to device and cloud, please wait a moment ...
+23-Nov-25 15:16:38: root - INFO - [BLE]: Giving time to API client to send data
+23-Nov-25 15:16:39: root - INFO - [BLE]: Sending stop command to device
+23-Nov-25 15:16:40: root - INFO - [BLE]: Sending disconnect command to device
+23-Nov-25 15:16:44: root - INFO - [BLE]: Callback function recognised a disconnection.
+23-Nov-25 15:16:45: root - INFO - [BLE]: Recording successfully stopped
+23-Nov-25 15:16:45: root - INFO - [BLE]: Giving time to API client to send data
+23-Nov-25 15:16:46: root - INFO - [BLE]: Ensuring device is disconnected
+23-Nov-25 15:16:48: root - INFO - [BLE]: -----------  BLE client is COMPLETED ----------- 

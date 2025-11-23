@@ -1,0 +1,11 @@
+23-Nov-25 14:56:00: root - INFO - No BLE address provided, will search for device...
+23-Nov-25 14:56:00: root - INFO - [BLE]: BLE client initiliazed
+23-Nov-25 14:56:06: root - INFO - [BLE]: No IGEB device found, trying again in 3 seconds
+23-Nov-25 14:56:14: root - INFO - [BLE]: No IGEB device found, trying again in 3 seconds
+23-Nov-25 14:56:22: root - INFO - [BLE]: No IGEB device found, trying again in 3 seconds
+23-Nov-25 14:56:30: root - INFO - [BLE]: No IGEB device found, trying again in 3 seconds
+23-Nov-25 14:56:38: root - INFO - [BLE]: No IGEB device found, trying again in 3 seconds
+23-Nov-25 14:56:46: root - INFO - [BLE]: No IGEB device found, trying again in 3 seconds
+23-Nov-25 14:56:54: root - INFO - [BLE]: No IGEB device found, trying again in 3 seconds
+23-Nov-25 14:57:02: root - INFO - [BLE]: No IGEB device found, trying again in 3 seconds
+23-Nov-25 14:57:10: root - INFO - [BLE]: No IGEB device found, trying again in 3 seconds

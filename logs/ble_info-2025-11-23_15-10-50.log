@@ -1,0 +1,55 @@
+23-Nov-25 15:10:50: root - INFO - No BLE address provided, will search for device...
+23-Nov-25 15:10:50: root - INFO - [BLE]: BLE client initiliazed
+23-Nov-25 15:10:55: root - INFO - [BLE]: One IGEB device found, assinging address D9:23:64:C0:46:A9
+23-Nov-25 15:10:55: root - INFO - [BLE]: Received address as D9:23:64:C0:46:A9
+23-Nov-25 15:10:55: root - INFO - [CLIENT]: Recording timer set to: 36000 seconds
+23-Nov-25 15:10:55: root - INFO - [CLIENT]: Start recording
+23-Nov-25 15:10:55: root - INFO - [CLIENT] Recording ID: py-299ffdc8-acc5-49c3-8295-f10d0bf2c9a6
+23-Nov-25 15:10:55: root - INFO - [CLIENT] Experiment description: EyeTracker
+23-Nov-25 15:10:55: root - INFO - [BLE]: Trying to connect to D9:23:64:C0:46:A9.....
+23-Nov-25 15:10:57: root - INFO - [BLE]: Searching for MAC address
+23-Nov-25 15:10:58: root - INFO - [BLE] Device ID (based on MAC address is): D9-23-64-C0-46-A9
+23-Nov-25 15:10:58: root - INFO - [BLE]: Firmware version: 1.0.0
+23-Nov-25 15:10:58: root - INFO - [BLE]: Connected to D9:23:64:C0:46:A9
+23-Nov-25 15:10:58: root - INFO - [BLE]: Current Device Status=1
+23-Nov-25 15:10:58: root - INFO - [BLE]: Connection: True
+23-Nov-25 15:10:58: root - INFO - [BLE]: Initialize: False
+23-Nov-25 15:10:58: root - INFO - [BLE]: Device connected
+23-Nov-25 15:10:58: root - INFO - [BLE]: Sending start commands
+23-Nov-25 15:10:58: root - INFO - [BLE]: Subscribing EEG notification
+23-Nov-25 15:10:58: root - INFO - [API]: Connecting to cloud...
+23-Nov-25 15:11:42: root - INFO - [BLE]: Subscribing battery notification
+23-Nov-25 15:11:42: root - INFO - [API]: Interuption in sending or receiving data to the cloud: server rejected WebSocket connection: HTTP 401
+23-Nov-25 15:11:42: root - INFO - [API]: Connecting to cloud...
+23-Nov-25 15:11:53: root - INFO - [API]: Interuption in sending or receiving data to the cloud: server rejected WebSocket connection: HTTP 401
+23-Nov-25 15:11:53: root - INFO - [API]: Connecting to cloud...
+23-Nov-25 15:11:57: root - INFO - [BLE]: KeyboardInterrupt applied, terminating...
+23-Nov-25 15:11:57: root - INFO - [BLE]: Sending stop signal to device and cloud, please wait a moment ...
+23-Nov-25 15:11:57: root - INFO - [BLE]: Giving time to API client to send data
+23-Nov-25 15:11:58: root - INFO - [BLE]: Sending stop command to device
+23-Nov-25 15:11:59: root - INFO - [BLE]: Sending disconnect command to device
+23-Nov-25 15:12:03: root - INFO - [BLE]: Callback function recognised a disconnection.
+23-Nov-25 15:12:04: root - INFO - [BLE]: Recording successfully stopped
+23-Nov-25 15:12:04: root - INFO - [BLE]: Giving time to API client to send data
+23-Nov-25 15:12:05: root - INFO - [BLE]: Ensuring device is disconnected
+23-Nov-25 15:12:07: root - INFO - [BLE]: -----------  BLE client is COMPLETED ----------- 
+23-Nov-25 15:12:08: asyncio - ERROR - Task exception was never retrieved
+future: <Task finished name='Task-4' coro=<GuardianAPI.connect_ws_api() done, defined at C:\Users\andik\Desktop\TU Graz - SEM\Bachelor Arbeit\find_the_differencex_game\.venv\lib\site-packages\idun_guardian_client\igeb_api.py:95> exception=KeyboardInterrupt()>
+Traceback (most recent call last):
+  File "C:\Users\andik\Desktop\TU Graz - SEM\Bachelor Arbeit\find_the_differencex_game\eye_tracker.py", line 172, in <module>
+    asyncio.run(run_experiment())
+  File "C:\Users\andik\AppData\Local\Programs\Python\Python310\lib\asyncio\runners.py", line 44, in run
+    return loop.run_until_complete(main)
+  File "C:\Users\andik\AppData\Local\Programs\Python\Python310\lib\asyncio\base_events.py", line 636, in run_until_complete
+    self.run_forever()
+  File "C:\Users\andik\AppData\Local\Programs\Python\Python310\lib\asyncio\windows_events.py", line 321, in run_forever
+    super().run_forever()
+  File "C:\Users\andik\AppData\Local\Programs\Python\Python310\lib\asyncio\base_events.py", line 603, in run_forever
+    self._run_once()
+  File "C:\Users\andik\AppData\Local\Programs\Python\Python310\lib\asyncio\base_events.py", line 1909, in _run_once
+    handle._run()
+  File "C:\Users\andik\AppData\Local\Programs\Python\Python310\lib\asyncio\events.py", line 80, in _run
+    self._context.run(self._callback, *self._args)
+  File "C:\Users\andik\Desktop\TU Graz - SEM\Bachelor Arbeit\find_the_differencex_game\.venv\lib\site-packages\idun_guardian_client\igeb_api.py", line 401, in connect_ws_api
+    self.password = input("\nEnter your new password here: ")
+KeyboardInterrupt

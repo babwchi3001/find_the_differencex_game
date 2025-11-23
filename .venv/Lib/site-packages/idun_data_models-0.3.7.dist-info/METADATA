@@ -1,0 +1,21 @@
+Metadata-Version: 2.1
+Name: idun_data_models
+Version: 0.3.7
+Summary: 
+Author: Konstantinos Samaras-Tsakiris
+Author-email: konstantinos@iduntechnologies.com
+Requires-Python: >=3.10,<4.0
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Requires-Dist: pydantic (>=1.10,<2.0)
+Description-Content-Type: text/markdown
+
+# IDUN Guardian data model library
+
+This library includes the IDUN Guardian data model, which is used by both the frontend and the backend.
+
+## Features
+
+- Data model
+
