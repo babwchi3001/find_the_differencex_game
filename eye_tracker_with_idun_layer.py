@@ -1,172 +1,141 @@
 import pygame
 import sys
 import math
-import asyncio
-from idun_guardian_client import GuardianClient, GuardianAPI
-from idun_guardian_client.igeb_utils import stop_rec
+import time
+from pylsl import StreamInfo, StreamOutlet, local_clock
 
 
-EXPERIMENT = "EyeTracker"
-RECORDING_TIMER = 36000
-LED_SLEEP = False
-SENDING_TIMEOUT = 2
-BI_DIRECTIONAL_TIMEOUT = 20
+last_ts = 0.0
+MIN_SPACING = 0.0001
+
+def send_marker(outlet, message):
+    global last_ts
+    ts = local_clock()
+    if ts <= last_ts:
+        ts = last_ts + MIN_SPACING
+    last_ts = ts
+    outlet.push_sample([message], ts)
+    print(f"Sent marker: {message} at {ts:.6f}")
 
 
-async def start_idun_recording():
-    bci = GuardianClient()
-
-    # Find earbuds via BLE
-    print("Searching for IDUN earbuds...")
-    bci.address = await bci.search_device()
-    print("Device found:", bci.address)
-
-    # Start offline recording
-    await bci.start_recording(
-        recording_timer=RECORDING_TIMER,
-        led_sleep=LED_SLEEP,
-        experiment=EXPERIMENT,
-        sending_timout=SENDING_TIMEOUT,
-        bi_directional_receiving_timeout=BI_DIRECTIONAL_TIMEOUT,
+# ---------------------------------------------------------
+def create_lsl_marker_stream():
+    info = StreamInfo(
+        'EyeTrackerMarkers', 'Markers', 1, 0,
+        'string', 'eyetracker_marker_stream'
     )
+    outlet = StreamOutlet(info)
+    print("LSL marker stream created.")
+    return outlet
 
-    print("Recording started. Recording ID:", bci.recording_id)
-    return bci
+def wait_for_labrecorder_connection(outlet, timeout=60):
+    print("Waiting for LabRecorder to start recording...")
+    start_time = time.time()
 
+    while True:
+        if outlet.have_consumers():
+            print("LabRecorder connected and recording!")
+            return True
 
-async def stop_idun_recording(bci):
-    print("Stopping recording...")
+        if (time.time() - start_time) > timeout:
+            print("Timeout: LabRecorder did not connect.")
+            return False
 
-    # 1) Stop the recording
-    stop_rec(
-        device_id=bci.address,
-        recording_id=bci.recording_id,
-    )
+        time.sleep(0.2)
 
-    print("Recording stopped. Downloading data...")
+# ---------------------------------------------------------
+def run_experiment():
 
-    # 2) Download & extract CSV data
-    api = GuardianAPI()
-    api.download_recording_by_id(
-        device_id=bci.address,
-        recording_id=bci.recording_id,
-    )
+    marker_outlet = create_lsl_marker_stream()
 
-    print("CSV export complete.")
-
-async def run_experiment():
-    bci = await start_idun_recording()
-
-
+    if not wait_for_labrecorder_connection(marker_outlet, 120):
+        print("Experiment NOT started because LabRecorder is not recording.")
+        return
     pygame.init()
+    info = pygame.display.Info()
+    WIDTH, HEIGHT = info.current_w, info.current_h
 
-    # Window
     screen = pygame.display.set_mode(
-        (0, 0),
-        pygame.FULLSCREEN | pygame.DOUBLEBUF
+        (WIDTH, HEIGHT),
+        pygame.NOFRAME | pygame.DOUBLEBUF
     )
-    WIDTH, HEIGHT = screen.get_size()
-    pygame.display.set_caption("Advanced Dot Movement")
 
     clock = pygame.time.Clock()
 
-    # Dot parameters
     start_x = WIDTH // 2
     start_y = HEIGHT // 2
     x = float(start_x)
     y = float(start_y)
+
     radius = 15
-    speed = 5.0   # high speed now okay
+    speed = 2.0
 
-    # Directions: straight + diagonal
-    directions = [
-        (1, 0),
-        (-1, 0),
-        (0, 1),
-        (0, -1),
-        (1, 1),
-        (-1, 1),
-        (1, -1),
-        (-1, -1),
-    ]
-
+    directions = [(1, 0), (-1, 0)]
     direction_index = 0
     dx, dy = directions[direction_index]
 
+    experiment_start = local_clock()
+    send_marker(marker_outlet, "ExperimentStart")
+
+    running = True
+    duration = 60.0 
     mode = "MOVING"
-    target = None
 
-    # Bulletproof movement (never overshoots)
-    def move_towards(px, py, tx, ty, v):
-        dx = tx - px
-        dy = ty - py
-        dist2 = dx*dx + dy*dy
-        if dist2 <= v*v:
-            return float(tx), float(ty)
-        dist = math.sqrt(dist2)
-        return px + (dx/dist)*v, py + (dy/dist)*v
+    while running:
 
-    def diagonal_opposite_edge(dx, dy):
-        if dx == 1 and dy == 1:  return (0, HEIGHT // 2)
-        if dx == -1 and dy == 1: return (WIDTH // 2, 0)
-        if dx == 1 and dy == -1: return (WIDTH // 2, HEIGHT)
-        if dx == -1 and dy == -1:return (WIDTH, HEIGHT // 2)
-        return None
+        dt = clock.tick(240)
 
-    # -------------------- MAIN LOOP --------------------
-    while True:
-        dt = clock.tick(240)   # HIGH FPS for smooth motion
+        if (local_clock() - experiment_start) >= duration:
+            running = False
+            break
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                pygame.quit()
-                sys.exit()
+                running = False
             if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                pygame.quit()
-                sys.exit()
+                running = False
 
         screen.fill((0, 0, 0))
 
-        # MOVEMENT LOGIC (unchanged)
         if mode == "MOVING":
             x += dx * speed
-            y += dy * speed
 
-            if dx == 0 or dy == 0:
-                if x-radius <= 0 or x+radius >= WIDTH or y-radius <= 0 or y+radius >= HEIGHT:
-                    target = (start_x, start_y)
-                    mode = "RETURN_TO_CENTER"
-            else:
-                if x-radius <= 0 or x+radius >= WIDTH or y-radius <= 0 or y+radius >= HEIGHT:
-                    target = diagonal_opposite_edge(dx, dy)
-                    mode = "TO_EDGE"
+            if x - radius <= 0 or x + radius >= WIDTH:
+                move_name = "Horizontal-Right" if dx == 1 else "Horizontal-Left"
+                send_marker(marker_outlet, move_name)
 
-        elif mode == "TO_EDGE":
-            x, y = move_towards(x, y, target[0], target[1], speed)
-            if (int(x), int(y)) == target:
-                target = (start_x, start_y)
                 mode = "RETURN_TO_CENTER"
+                target = (start_x, start_y)
 
         elif mode == "RETURN_TO_CENTER":
-            x, y = move_towards(x, y, start_x, start_y, speed)
-            if (int(x), int(y)) == (start_x, start_y):
-                if direction_index == len(directions)-1:
-                    pygame.quit()
-                    
-                    await stop_idun_recording(bci)
-                    sys.exit()
+            dx_c = target[0] - x
+            dy_c = target[1] - y
 
-                direction_index += 1
+            dist = math.sqrt(dx_c ** 2 + dy_c ** 2)
+            if dist <= speed:
+                x = float(start_x)
+                y = float(start_y)
+                send_marker(marker_outlet, "ReturnedToCenter")
+
+                direction_index = 1 - direction_index
                 dx, dy = directions[direction_index]
                 mode = "MOVING"
+            else:
+                x += (dx_c / dist) * speed
+                y += (dy_c / dist) * speed
 
-        # -------------------- NEW DRAWING CODE (no blur!) --------------------
-        dot_surf = pygame.Surface((radius*2, radius*2), pygame.SRCALPHA)
-        pygame.draw.circle(dot_surf, (255, 0, 0), (radius, radius), radius)
-        screen.blit(dot_surf, (x - radius, y - radius))
+        dot = pygame.Surface((radius * 2, radius * 2), pygame.SRCALPHA)
+        pygame.draw.circle(dot, (255, 0, 0), (radius, radius), radius)
+        screen.blit(dot, (x - radius, y - radius))
 
         pygame.display.flip()
 
+    pygame.quit()
+
+    send_marker(marker_outlet, "ExperimentEnd")
+    print("Experiment finished.")
+    sys.exit()
+
 
 if __name__ == "__main__":
-    asyncio.run(run_experiment())
+    run_experiment()
