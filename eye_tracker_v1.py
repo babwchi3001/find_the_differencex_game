@@ -6,9 +6,6 @@ import ctypes
 import os
 from pylsl import StreamInfo, StreamOutlet, local_clock
 
-# --------------------------
-# LSL Marker Stream
-# --------------------------
 last_ts = 0.0
 MIN_SPACING = 0.0001
 
@@ -39,18 +36,12 @@ def wait_for_labrecorder_connection(outlet, timeout=60):
             return False
         time.sleep(0.2)
 
-# --------------------------
-# Experiment Parameters
-# --------------------------
-CONSTANT_SPEED = 700  # pixels per second
+CONSTANT_SPEED = 700
 CENTER_HOLD = 3.0
 RADIUS = 25
 REPEAT_CYCLES = 5
 
 INITIAL_WAIT = True
-# --------------------------
-# Fullscreen on chosen monitor
-# --------------------------
 def get_monitor_geometry(monitor_index=0):
     user32 = ctypes.windll.user32
     user32.SetProcessDPIAware()
@@ -87,9 +78,6 @@ def get_monitor_geometry(monitor_index=0):
 
     return x_offset, y_offset, width, height
 
-# --------------------------
-# Wait for start button
-# --------------------------
 def wait_for_start_click(screen, font):
     screen.fill((0, 0, 0))
     button_rect = pygame.Rect(0, 0, 300, 100)
@@ -113,9 +101,6 @@ def wait_for_start_click(screen, font):
                 if button_rect.collidepoint(event.pos):
                     waiting = False
 
-# --------------------------
-# Movement helper
-# --------------------------
 def move_to_position(screen, clock, marker_outlet, current_x, current_y, target_x, target_y, radius, speed, marker_name):
     send_marker(marker_outlet, marker_name)
     
@@ -159,16 +144,12 @@ def move_to_position(screen, clock, marker_outlet, current_x, current_y, target_
         if progress >= 1.0:
             return target_x, target_y
 
-# --------------------------
-# Run Experiment
-# --------------------------
 def run_experiment(monitor_index=0):
     marker_outlet = create_lsl_marker_stream()
     if not wait_for_labrecorder_connection(marker_outlet, 120):
         print("Experiment NOT started because LabRecorder is not recording.")
         return
 
-    # Fullscreen on chosen monitor
     x_offset, y_offset, WIDTH, HEIGHT = get_monitor_geometry(monitor_index)
     os.environ['SDL_VIDEO_WINDOW_POS'] = f"{x_offset},{y_offset}"
 
@@ -178,7 +159,6 @@ def run_experiment(monitor_index=0):
     clock = pygame.time.Clock()
     font = pygame.font.SysFont(None, 60)
 
-    # Wait for user to click START
     wait_for_start_click(screen, font)
 
     start_x = WIDTH // 2
@@ -186,11 +166,9 @@ def run_experiment(monitor_index=0):
     current_x = start_x
     current_y = start_y
 
-    #send_marker(marker_outlet, "Start")
 
     for repeat in range(REPEAT_CYCLES):
 
-        # Horizontal movement
         horizontal_positions = [
             ("Left", (RADIUS*2, start_y)),
             ("Right", (WIDTH - RADIUS*2, start_y)),
@@ -200,7 +178,6 @@ def run_experiment(monitor_index=0):
         for dir_name, (tx, ty) in horizontal_positions:
             current_x, current_y = move_to_position(screen, clock, marker_outlet, current_x, current_y, tx, ty, RADIUS, CONSTANT_SPEED, f"Move-{dir_name}")
 
-        # Return to center and hold
         current_x, current_y = move_to_position(screen, clock, marker_outlet, current_x, current_y, start_x, start_y, RADIUS, CONSTANT_SPEED, "ReturnToCenter-Horizontal")
         hold_start = time.time()
         send_marker(marker_outlet, "HoldCenter-AfterHorizontal")
@@ -214,7 +191,6 @@ def run_experiment(monitor_index=0):
             pygame.display.flip()
             clock.tick(240)
 
-        # Vertical movement
         vertical_positions = [
             ("Up", (start_x, RADIUS*2)),
             ("Down", (start_x, HEIGHT - RADIUS*2)),
@@ -224,7 +200,6 @@ def run_experiment(monitor_index=0):
         for dir_name, (tx, ty) in vertical_positions:
             current_x, current_y = move_to_position(screen, clock, marker_outlet, current_x, current_y, tx, ty, RADIUS, CONSTANT_SPEED, f"Move-{dir_name}")
 
-        # Return to center and hold before next repeat
         current_x, current_y = move_to_position(screen, clock, marker_outlet, current_x, current_y, start_x, start_y, RADIUS, CONSTANT_SPEED, "ReturnToCenter-Vertical")
         if repeat < REPEAT_CYCLES - 1:
             hold_start = time.time()
@@ -243,9 +218,5 @@ def run_experiment(monitor_index=0):
     pygame.quit()
     sys.exit()
 
-# --------------------------
-# Main
-# --------------------------
 if __name__ == "__main__":
-    # Set monitor_index = 0 (primary), 1 (secondary), etc.
     run_experiment(monitor_index=1)

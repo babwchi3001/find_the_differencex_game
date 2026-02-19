@@ -9,15 +9,9 @@ import ctypes
 from pylsl import StreamInfo, StreamOutlet, local_clock
 import argparse
 
-# --------------------------
-# Initialize Pygame
-# --------------------------
 pygame.init()
 pygame.font.init()
 
-# --------------------------
-# LSL Marker Stream
-# --------------------------
 last_lsl_ts = 0
 MIN_SPACING = 0.0001
 
@@ -34,9 +28,6 @@ info = StreamInfo("GameMarkers", "Markers", 1, 0, "string", "game_marker_stream"
 outlet = StreamOutlet(info)
 print("LSL marker stream created.")
 
-# --------------------------
-# Settings / Globals
-# --------------------------
 parser = argparse.ArgumentParser(description="Find-the-differences experiment")
 parser.add_argument(
         "--image_folder",
@@ -63,14 +54,10 @@ running = True
 logfile = None
 writer = None
 
-# --------------------------
-# Choose Monitor (0=primary, 1=secondary, etc.)
-# --------------------------
-monitor_index = 1  # Change this to the monitor you want
+monitor_index = 1
 user32 = ctypes.windll.user32
 user32.SetProcessDPIAware()
 
-# Get monitor positions
 screen_width_primary = user32.GetSystemMetrics(0)
 screen_height_primary = user32.GetSystemMetrics(1)
 
@@ -79,17 +66,13 @@ screen = pygame.display.set_mode(
     pygame.FULLSCREEN | pygame.SHOWN, display=1
 )
 pygame.display.set_caption("Find The Differences")
-monitor_offsets = [(0, 0)]  # primary
+monitor_offsets = [(0, 0)] 
 if monitor_index > 0:
-    # simple assumption: monitor 1 is to the right of primary
     monitor_offsets.append((screen_width_primary, 0))
 x_offset, y_offset = monitor_offsets[monitor_index]
 
 os.environ['SDL_VIDEO_WINDOW_POS'] = f"{x_offset},{y_offset}"
 
-# --------------------------
-# Load Level
-# --------------------------
 def load_level(level):
     global left_img, right_img, difference_regions, found
     global LEFT_POS, RIGHT_POS, IMAGE_SIZE
@@ -134,31 +117,22 @@ def load_level(level):
     found = [False] * len(difference_regions)
     return difference_regions
 
-# --------------------------
-# Wait for LabRecorder
-# --------------------------
 def wait_for_labrecorder_connection(outlet, timeout=60):
     print("Waiting for LabRecorder to connect and receive the marker stream...")
     start_time = time.time()
-    """while True:
+    while True:
         if outlet.have_consumers():
-            print("✔ LabRecorder connected! Starting game.")
+            print("LabRecorder connected! Starting game.")
             return True
         if (time.time() - start_time) > timeout:
-            print("❌ Timeout: LabRecorder did not connect.")
+            print("Timeout: LabRecorder did not connect.")
             return False
-        time.sleep(0.25)"""
+        time.sleep(0.25)
 
-# --------------------------
-# Timestamp
-# --------------------------
 def get_timestamp():
     ts = time.time()
     return datetime.datetime.fromtimestamp(ts)
 
-# --------------------------
-# Draw Game
-# --------------------------
 def draw_game():
     screen.fill((220, 220, 220))
     screen.blit(left_img, LEFT_POS)
@@ -173,9 +147,6 @@ def draw_game():
     screen.blit(text, (50, screen.get_height()-50))
     pygame.display.flip()
 
-# --------------------------
-# Check Click
-# --------------------------
 def check_click(pos):
     global current_level, difference_regions, found
 
@@ -211,19 +182,13 @@ def check_click(pos):
     writer.writerow([timestamp, current_level, gx, gy, False, "wrong"])
     send_marker(f"WrongClick-Level{current_level}")
 
-# --------------------------
-# Force Foreground
-# --------------------------
 def force_foreground():
     hwnd = pygame.display.get_wm_info()["window"]
     ctypes.windll.user32.ShowWindow(hwnd, 9)
     ctypes.windll.user32.SetForegroundWindow(hwnd)
 
-# --------------------------
-# Start Button (Simple, Single Click)
-# --------------------------
 def wait_for_start_click():
-    screen.fill((30, 30, 30))  # dark background
+    screen.fill((30, 30, 30))
     button_rect = pygame.Rect(0, 0, 300, 100)
     button_rect.center = screen.get_rect().center
     pygame.draw.rect(screen, (0, 200, 0), button_rect)
@@ -243,23 +208,17 @@ def wait_for_start_click():
                 exit()
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if button_rect.collidepoint(event.pos):
-                    waiting = False  # exit on first click
+                    waiting = False
 
-# --------------------------
-# Main
-# --------------------------
-"""if not wait_for_labrecorder_connection(outlet, timeout=120):
+if not wait_for_labrecorder_connection(outlet, timeout=120):
     print("Recorder not connected → exiting.")
     pygame.quit()
-    exit()"""
+    exit()
 
-# Fullscreen on chosen monitor
 force_foreground()
 
-# Show start button and wait for click
 wait_for_start_click()
 
-# Load first level and setup logging
 current_level = 1
 difference_regions = load_level(current_level)
 logfile = open("click_log.csv", "w", newline="")
@@ -268,9 +227,6 @@ writer.writerow(["timestamp", "level", "global_x", "global_y", "correct", "diffe
 
 send_marker("GameStart")
 
-# --------------------------
-# Game Loop
-# --------------------------
 running = True
 while running:
     clock.tick(60)

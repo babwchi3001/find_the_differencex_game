@@ -5,9 +5,6 @@ import ctypes
 import os
 from pylsl import StreamInfo, StreamOutlet, local_clock
 
-# --------------------------
-# LSL Marker Stream
-# --------------------------
 last_ts = 0.0
 MIN_SPACING = 0.0001
 
@@ -41,17 +38,11 @@ def wait_for_labrecorder_connection(outlet, timeout=60):
         time.sleep(0.2)
 
 
-# --------------------------
-# Experiment Parameters
-# --------------------------
 CENTER_HOLD = 3.0
 EDGE_HOLD = 1.0
 RADIUS = 25
 REPEAT_CYCLES = 5
 
-# --------------------------
-# Wait for start click
-# --------------------------
 def wait_for_start_click(screen, font):
     screen.fill((0, 0, 0))
     button_rect = pygame.Rect(0, 0, 300, 100)
@@ -73,31 +64,22 @@ def wait_for_start_click(screen, font):
                 sys.exit()
             if event.type == pygame.MOUSEBUTTONDOWN:
                 if button_rect.collidepoint(event.pos):
-                    waiting = False  # exit on click
+                    waiting = False
 
-# --------------------------
-# Run Experiment
-# --------------------------
 def run_experiment(monitor_index=0):
-    # LSL
     marker_outlet = create_lsl_marker_stream()
     if not wait_for_labrecorder_connection(marker_outlet, 120):
         print("Experiment NOT started: LabRecorder not recording.")
         return
 
-    # --------------------------
-    # Detect monitors and fullscreen on chosen monitor
-    # --------------------------
     user32 = ctypes.windll.user32
     user32.SetProcessDPIAware()
 
-    # Get number of monitors
-    num_monitors = user32.GetSystemMetrics(80)  # SM_CMONITORS
+    num_monitors = user32.GetSystemMetrics(80)
     if monitor_index >= num_monitors:
         print(f"Monitor index {monitor_index} out of range. Defaulting to primary monitor.")
         monitor_index = 0
 
-    # Get monitor positions and sizes
     MONITORINFOF_PRIMARY = 1
     class RECT(ctypes.Structure):
         _fields_ = [("left", ctypes.c_long),
@@ -117,7 +99,6 @@ def run_experiment(monitor_index=0):
     MonitorEnumProc = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(RECT), ctypes.c_double)
     ctypes.windll.user32.EnumDisplayMonitors(0, 0, MonitorEnumProc(monitor_enum_proc), 0)
 
-    # Get monitor rect
     mi = MONITORINFO()
     mi.cbSize = ctypes.sizeof(MONITORINFO)
     ctypes.windll.user32.GetMonitorInfoW(monitor_handles[monitor_index], ctypes.byref(mi))
@@ -128,14 +109,12 @@ def run_experiment(monitor_index=0):
 
     os.environ['SDL_VIDEO_WINDOW_POS'] = f"{x_offset},{y_offset}"
 
-    # Pygame setup
     pygame.init()
     screen = pygame.display.set_mode((width, height), pygame.NOFRAME | pygame.DOUBLEBUF)
     pygame.display.set_caption("Eye Movement Experiment")
     clock = pygame.time.Clock()
     font = pygame.font.SysFont(None, 50)
 
-    # Wait for user to start
     wait_for_start_click(screen, font)
 
     center_x, center_y = width // 2, height // 2
@@ -149,10 +128,8 @@ def run_experiment(monitor_index=0):
 
     send_marker(marker_outlet, "ExperimentStart")
 
-    # Repeat cycles
     for _ in range(REPEAT_CYCLES):
         for dir_name, (tx, ty) in directions:
-            # Hold at center
             hold_start = time.time()
             while time.time() - hold_start < CENTER_HOLD:
                 for event in pygame.event.get():
@@ -166,7 +143,6 @@ def run_experiment(monitor_index=0):
 
             send_marker(marker_outlet, f"Move-{dir_name}")
 
-            # Move to edge and hold
             hold_start = time.time()
             while time.time() - hold_start < EDGE_HOLD:
                 for event in pygame.event.get():
@@ -185,9 +161,5 @@ def run_experiment(monitor_index=0):
     sys.exit()
 
 
-# --------------------------
-# Main
-# --------------------------
 if __name__ == "__main__":
-    # Set monitor_index to 0 (primary), 1 (secondary), etc.
     run_experiment(monitor_index=1)
