@@ -162,4 +162,4 @@ def run_experiment(monitor_index=0):
 
 
 if __name__ == "__main__":
-    run_experiment(monitor_index=1)
+    run_experiment(monitor_index=0)

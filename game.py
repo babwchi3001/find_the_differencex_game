@@ -6,7 +6,7 @@ from PIL import Image
 import os
 import datetime
 import ctypes
-from pylsl import StreamInfo, StreamOutlet, local_clock
+from pylsl import StreamInfo, StreamOutlet, local_clock, resolve_byprop
 import argparse
 
 pygame.init()
@@ -15,7 +15,8 @@ pygame.font.init()
 last_lsl_ts = 0
 MIN_SPACING = 0.0001
 
-def send_marker(message):
+
+def send_marker(outlet, message):
     global last_lsl_ts
     ts = local_clock()
     if ts <= last_lsl_ts:
@@ -24,9 +25,6 @@ def send_marker(message):
     outlet.push_sample([message], ts)
     print(f"[LSL] {message} at {ts:.4f}")
 
-info = StreamInfo("GameMarkers", "Markers", 1, 0, "string", "game_marker_stream")
-outlet = StreamOutlet(info)
-print("LSL marker stream created.")
 
 parser = argparse.ArgumentParser(description="Find-the-differences experiment")
 parser.add_argument(
@@ -61,24 +59,61 @@ user32.SetProcessDPIAware()
 screen_width_primary = user32.GetSystemMetrics(0)
 screen_height_primary = user32.GetSystemMetrics(1)
 
-screen = pygame.display.set_mode(
-    (2560, 1440),
-    pygame.FULLSCREEN | pygame.SHOWN, display=1
-)
-pygame.display.set_caption("Find The Differences")
-monitor_offsets = [(0, 0)] 
+# --- START LOGIC FIX: Create LSL outlet FIRST (before display/fullscreen) ---
+def create_lsl_marker_stream():
+    info = StreamInfo('GameMarkers', 'Markers', 1, 0, 'string', 'game_marker_stream')
+    outlet = StreamOutlet(info)
+    print("LSL marker stream created.")
+    return outlet
+
+def wait_for_labrecorder_connection(outlet, timeout=60):
+    print("Waiting for LabRecorder to start recording...")
+    start_time = time.time()
+    while True:
+        if outlet.have_consumers():
+            print("LabRecorder connected and recording!")
+            return True
+        if (time.time() - start_time) > timeout:
+            print("Timeout: LabRecorder did not connect.")
+            return False
+        time.sleep(0.2)
+
+market_outlet = create_lsl_marker_stream()
+
+# (optional debug) Now the stream exists, so resolve_byprop makes sense:
+print("Looking for my own stream on the network...")
+streams = resolve_byprop('name', 'GameMarkers', timeout=2)
+print("Found:", len(streams))
+for s in streams:
+    print(" -", s.name(), s.type(), s.source_id())
+
+if not wait_for_labrecorder_connection(outlet=market_outlet, timeout=120):
+    print("Recorder not connected → exiting.")
+    pygame.quit()
+    exit()
+
+# --- START LOGIC FIX: set window pos BEFORE set_mode ---
+monitor_offsets = [(0, 0)]
 if monitor_index > 0:
     monitor_offsets.append((screen_width_primary, 0))
 x_offset, y_offset = monitor_offsets[monitor_index]
-
 os.environ['SDL_VIDEO_WINDOW_POS'] = f"{x_offset},{y_offset}"
 
-def load_level(level):
+# now create the window (unchanged otherwise)
+screen = pygame.display.set_mode(
+    (2560, 1440),
+    pygame.FULLSCREEN | pygame.SHOWN, display=0
+)
+pygame.display.set_caption("Find The Differences")
+
+# --- everything below unchanged ---
+
+def load_level(outlet, level):
     global left_img, right_img, difference_regions, found
     global LEFT_POS, RIGHT_POS, IMAGE_SIZE
 
     print(f"\n--- Loading level {level} ---")
-    send_marker(f"LevelStart-{level}")
+    send_marker(outlet, f"LevelStart-{level}")
 
     left_path = f"{IMAGE_FOLDER}/{level} Left.png"
     right_path = f"{IMAGE_FOLDER}/{level} Right.png"
@@ -86,7 +121,7 @@ def load_level(level):
 
     if not os.path.exists(left_path):
         print("No more levels. Game finished.")
-        send_marker("GameFinished")
+        send_marker(outlet,"GameFinished")
         pygame.quit()
         exit()
 
@@ -117,18 +152,6 @@ def load_level(level):
     found = [False] * len(difference_regions)
     return difference_regions
 
-def wait_for_labrecorder_connection(outlet, timeout=60):
-    print("Waiting for LabRecorder to connect and receive the marker stream...")
-    start_time = time.time()
-    while True:
-        if outlet.have_consumers():
-            print("LabRecorder connected! Starting game.")
-            return True
-        if (time.time() - start_time) > timeout:
-            print("Timeout: LabRecorder did not connect.")
-            return False
-        time.sleep(0.25)
-
 def get_timestamp():
     ts = time.time()
     return datetime.datetime.fromtimestamp(ts)
@@ -147,7 +170,7 @@ def draw_game():
     screen.blit(text, (50, screen.get_height()-50))
     pygame.display.flip()
 
-def check_click(pos):
+def check_click(outlet, pos):
     global current_level, difference_regions, found
 
     gx, gy = pos
@@ -159,7 +182,7 @@ def check_click(pos):
         img_offset = RIGHT_POS
     else:
         writer.writerow([timestamp, current_level, gx, gy, False, "wrong-click"])
-        send_marker(f"WrongClick-Level{current_level}")
+        send_marker(outlet, f"WrongClick-Level{current_level}")
         return
 
     lx = gx - img_offset[0]
@@ -171,16 +194,16 @@ def check_click(pos):
             if dist <= r:
                 found[i] = True
                 writer.writerow([timestamp, current_level, gx, gy, True, i])
-                send_marker(f"CorrectDifference-Level{current_level}-ID{i}")
+                send_marker(outlet,f"CorrectDifference-Level{current_level}-ID{i}")
                 if all(found):
                     draw_game()
                     pygame.time.delay(600)
                     current_level += 1
-                    load_level(current_level)
+                    load_level(outlet, current_level)
                 return
 
     writer.writerow([timestamp, current_level, gx, gy, False, "wrong"])
-    send_marker(f"WrongClick-Level{current_level}")
+    send_marker(outlet, f"WrongClick-Level{current_level}")
 
 def force_foreground():
     hwnd = pygame.display.get_wm_info()["window"]
@@ -210,22 +233,16 @@ def wait_for_start_click():
                 if button_rect.collidepoint(event.pos):
                     waiting = False
 
-if not wait_for_labrecorder_connection(outlet, timeout=120):
-    print("Recorder not connected → exiting.")
-    pygame.quit()
-    exit()
-
 force_foreground()
-
 wait_for_start_click()
 
 current_level = 1
-difference_regions = load_level(current_level)
+difference_regions = load_level(market_outlet, current_level)
 logfile = open("click_log.csv", "w", newline="")
 writer = csv.writer(logfile)
 writer.writerow(["timestamp", "level", "global_x", "global_y", "correct", "difference_id"])
 
-send_marker("GameStart")
+send_marker(market_outlet, "GameStart")
 
 running = True
 while running:
@@ -237,8 +254,8 @@ while running:
         elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
             running = False
         elif event.type == pygame.MOUSEBUTTONDOWN:
-            check_click(pygame.mouse.get_pos())
+            check_click(market_outlet, pygame.mouse.get_pos())
 
-send_marker("GameStop")
+send_marker(market_outlet, "GameStop")
 pygame.quit()
 logfile.close()
