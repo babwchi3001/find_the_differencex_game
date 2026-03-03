@@ -6,7 +6,7 @@ from PIL import Image
 import os
 import datetime
 import ctypes
-from pylsl import StreamInfo, StreamOutlet, local_clock, resolve_byprop
+from pylsl import StreamInfo, StreamOutlet, StreamInlet, local_clock, resolve_byprop
 import argparse
 
 pygame.init()
@@ -28,13 +28,24 @@ def send_marker(outlet, message):
 
 parser = argparse.ArgumentParser(description="Find-the-differences experiment")
 parser.add_argument(
-        "--image_folder",
-        type=str,
-        default="Simple Images",
-        help="Folder containing experiment images"
-    )
+    "--image_folder",
+    type=str,
+    default="Simple Images",
+    help="Folder containing experiment images"
+)
+# NEW (only for 2-player start): give each device a unique id
+parser.add_argument(
+    "--player_id",
+    type=int,
+    choices=[1, 2],
+    required=True,
+    help="Player id for sync (use 1 on one PC and 2 on the other)"
+)
 
-IMAGE_FOLDER = parser.parse_args().image_folder
+args = parser.parse_args()
+IMAGE_FOLDER = args.image_folder
+PLAYER_ID = args.player_id
+
 left_img = right_img = None
 difference_regions = []
 found = []
@@ -106,7 +117,19 @@ screen = pygame.display.set_mode(
 )
 pygame.display.set_caption("Find The Differences")
 
-# --- everything below unchanged ---
+# -----------------------------------------------------------------------
+# 2-PLAYER START SYNC (GameSync stream)  ✅ BOTH must click START
+# -----------------------------------------------------------------------
+SYNC_NAME = "GameSync"
+sync_info = StreamInfo(SYNC_NAME, "Markers", 1, 0, "string", "game_sync_stream")
+sync_outlet = StreamOutlet(sync_info)
+sync_inlet = None
+
+# optional: make it visible immediately
+sync_outlet.push_sample([f"SYNC_ONLINE:{PLAYER_ID}"], local_clock())
+print("LSL sync stream created:", SYNC_NAME)
+
+# --- everything below unchanged except the start screen logic ---
 
 def load_level(outlet, level):
     global left_img, right_img, difference_regions, found
@@ -121,7 +144,7 @@ def load_level(outlet, level):
 
     if not os.path.exists(left_path):
         print("No more levels. Game finished.")
-        send_marker(outlet,"GameFinished")
+        send_marker(outlet, "GameFinished")
         pygame.quit()
         exit()
 
@@ -166,7 +189,11 @@ def draw_game():
             pygame.draw.circle(screen, (0, 255, 0), (LEFT_POS[0] + cx, LEFT_POS[1] + cy), r, 3)
             pygame.draw.circle(screen, (0, 255, 0), (RIGHT_POS[0] + cx, RIGHT_POS[1] + cy), r, 3)
 
-    text = font.render(f"Level {current_level}   Found: {sum(found)}/{len(difference_regions)}", True, (0, 0, 0))
+    text = font.render(
+        f"Level {current_level}   Found: {sum(found)}/{len(difference_regions)}",
+        True,
+        (0, 0, 0)
+    )
     screen.blit(text, (50, screen.get_height()-50))
     pygame.display.flip()
 
@@ -194,7 +221,7 @@ def check_click(outlet, pos):
             if dist <= r:
                 found[i] = True
                 writer.writerow([timestamp, current_level, gx, gy, True, i])
-                send_marker(outlet,f"CorrectDifference-Level{current_level}-ID{i}")
+                send_marker(outlet, f"CorrectDifference-Level{current_level}-ID{i}")
                 if all(found):
                     draw_game()
                     pygame.time.delay(600)
@@ -211,17 +238,37 @@ def force_foreground():
     ctypes.windll.user32.SetForegroundWindow(hwnd)
 
 def wait_for_start_click():
-    screen.fill((30, 30, 30))
+    """
+    BOTH devices must press START.
+    Local click sends READY:<PLAYER_ID> on GameSync.
+    Remote ready is only accepted if it is READY with the other player's id.
+    """
+    global sync_inlet
+
     button_rect = pygame.Rect(0, 0, 300, 100)
     button_rect.center = screen.get_rect().center
-    pygame.draw.rect(screen, (0, 200, 0), button_rect)
-    text = font.render("START", True, (255, 255, 255))
-    screen.blit(text, (button_rect.centerx - text.get_width()//2,
-                       button_rect.centery - text.get_height()//2))
-    pygame.display.flip()
+    status_font = pygame.font.SysFont(None, 40)
 
-    waiting = True
-    while waiting:
+    local_ready = False
+    remote_ready = False
+
+    other_id = 2 if PLAYER_ID == 1 else 1
+
+    while True:
+        # Keep trying to resolve the inlet (other device might start later)
+        if sync_inlet is None:
+            sync_streams = resolve_byprop("name", SYNC_NAME, timeout=1)
+            if sync_streams:
+                sync_inlet = StreamInlet(sync_streams[0])
+
+        # Pull sync messages non-blocking
+        if sync_inlet is not None:
+            sample, _ts = sync_inlet.pull_sample(timeout=0.0)
+            if sample:
+                msg = sample[0]
+                if msg == f"READY:{other_id}":
+                    remote_ready = True
+
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit()
@@ -230,8 +277,30 @@ def wait_for_start_click():
                 pygame.quit()
                 exit()
             elif event.type == pygame.MOUSEBUTTONDOWN:
-                if button_rect.collidepoint(event.pos):
-                    waiting = False
+                if button_rect.collidepoint(event.pos) and not local_ready:
+                    local_ready = True
+                    sync_outlet.push_sample([f"READY:{PLAYER_ID}"], local_clock())
+
+        # Draw start screen
+        screen.fill((30, 30, 30))
+        pygame.draw.rect(screen, (0, 120, 0) if local_ready else (0, 200, 0), button_rect)
+
+        text = font.render("START", True, (255, 255, 255))
+        screen.blit(
+            text,
+            (button_rect.centerx - text.get_width()//2,
+             button_rect.centery - text.get_height()//2)
+        )
+
+        status = f"You: {'READY' if local_ready else 'WAIT'}   Other: {'READY' if remote_ready else 'WAIT'}"
+        screen.blit(status_font.render(status, True, (255, 255, 255)), (50, 50))
+
+        pygame.display.flip()
+
+        if local_ready and remote_ready:
+            return
+
+        clock.tick(60)
 
 force_foreground()
 wait_for_start_click()
