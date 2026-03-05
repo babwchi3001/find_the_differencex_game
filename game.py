@@ -47,6 +47,12 @@ args = parser.parse_args()
 IMAGE_FOLDER = args.image_folder
 PLAYER_ID = args.player_id
 
+# MODE SWITCH:
+# - Coop_Images  -> show/merge remote found circles + remote-driven level completion
+# - Solo_Images  -> DO NOT listen to remote markers (no circles, no remote completion)
+FOLDER_BASE = os.path.basename(os.path.normpath(IMAGE_FOLDER)).lower()
+COOP_MODE = (FOLDER_BASE == "coop_images")
+
 left_img = right_img = None
 difference_regions = []
 found = []
@@ -78,8 +84,10 @@ stop_sync_thread = threading.Event()
 stop_remote_thread = threading.Event()
 sync_thread = None
 remote_thread = None
+level_complete_event = threading.Event()
 
-# --- Marker outlet (unique per player so other device can subscribe) ---
+
+# --- Marker outlet (unique per player so other device can subscribe in COOP_MODE) ---
 def create_lsl_marker_stream():
     marker_name = "GameMarkers"
     marker_source_id = f"game_markers_p{PLAYER_ID}"
@@ -87,6 +95,7 @@ def create_lsl_marker_stream():
     outlet = StreamOutlet(info)
     print(f"LSL marker stream created: name={marker_name} source_id={marker_source_id}")
     return outlet
+
 
 def wait_for_labrecorder_connection(outlet, timeout=60):
     print("Waiting for LabRecorder to start recording...")
@@ -99,6 +108,7 @@ def wait_for_labrecorder_connection(outlet, timeout=60):
             print("Timeout: LabRecorder did not connect.")
             return False
         time.sleep(0.2)
+
 
 market_outlet = create_lsl_marker_stream()
 
@@ -119,11 +129,12 @@ monitor_offsets = [(0, 0)]
 if monitor_index > 0:
     monitor_offsets.append((screen_width_primary, 0))
 x_offset, y_offset = monitor_offsets[monitor_index]
-os.environ['SDL_VIDEO_WINDOW_POS'] = f"{x_offset},{y_offset}"
+os.environ["SDL_VIDEO_WINDOW_POS"] = f"{x_offset},{y_offset}"
 
 screen = pygame.display.set_mode(
     (2560, 1440),
-    pygame.FULLSCREEN | pygame.SHOWN, display=0
+    pygame.FULLSCREEN | pygame.SHOWN,
+    display=0
 )
 pygame.display.set_caption("Find The Differences")
 
@@ -138,7 +149,6 @@ sync_inlet = None
 
 sync_outlet.push_sample([f"SYNC_ONLINE:{PLAYER_ID}"], local_clock())
 print(f"LSL sync stream created: name={SYNC_NAME} source_id={SYNC_SOURCE_ID}")
-level_complete_event = threading.Event()
 
 # -------------------- Threads --------------------
 
@@ -151,20 +161,19 @@ def sync_listener_thread(other_source_id: str, other_ready_msg: str):
     while not stop_sync_thread.is_set():
         try:
             if inlet is None:
-                streams = resolve_byprop("source_id", other_source_id, timeout=1)
-                if streams:
-                    inlet = StreamInlet(streams[0], processing_flags=proc_ALL)
+                st = resolve_byprop("source_id", other_source_id, timeout=1)
+                if st:
+                    inlet = StreamInlet(st[0], processing_flags=proc_ALL)
                     inlet.open_stream(timeout=2)
-                    print(f"[SYNC-THREAD] Connected to remote sync: source_id={streams[0].source_id()} host={streams[0].hostname()}")
+                    print(f"[SYNC-THREAD] Connected to remote sync: source_id={st[0].source_id()} host={st[0].hostname()}")
                 else:
                     continue
 
-            sample, ts = inlet.pull_sample(timeout=0.1)
+            sample, _ts = inlet.pull_sample(timeout=0.1)
             if sample is None:
                 continue
-            msg = sample[0]
-            if msg == other_ready_msg:
-                print(f"[SYNC-THREAD] Remote ready received: {msg}")
+            if sample[0] == other_ready_msg:
+                print(f"[SYNC-THREAD] Remote ready received: {sample[0]}")
                 remote_ready_event.set()
 
         except Exception as e:
@@ -172,26 +181,30 @@ def sync_listener_thread(other_source_id: str, other_ready_msg: str):
             inlet = None
             time.sleep(0.2)
 
+
 def remote_marker_listener(other_player_id: int):
     """
-    Background thread: listens to the other player's GameMarkers stream and updates found[].
+    COOP MODE ONLY:
+    Listen to the other player's GameMarkers stream and update found[] + level completion.
     """
     other_marker_source_id = f"game_markers_p{other_player_id}"
     inlet = None
-    pattern = re.compile(r"^CorrectDifference-Level(\d+)-ID(\d+)$")
+
+    # Matches: CorrectDifference-Level{lvl}-ID{idx}-PID{pid}
+    pattern = re.compile(r"^CorrectDifference-Level(\d+)-ID(\d+)-PID(\d+)$")
 
     while not stop_remote_thread.is_set():
         try:
             if inlet is None:
-                streams = resolve_byprop("source_id", other_marker_source_id, timeout=1)
-                if streams:
-                    inlet = StreamInlet(streams[0], processing_flags=proc_ALL)
+                st = resolve_byprop("source_id", other_marker_source_id, timeout=1)
+                if st:
+                    inlet = StreamInlet(st[0], processing_flags=proc_ALL)
                     inlet.open_stream(timeout=2)
-                    print(f"[REMOTE] Connected to other markers: source_id={streams[0].source_id()} host={streams[0].hostname()}")
+                    print(f"[REMOTE] Connected to other markers: source_id={st[0].source_id()} host={st[0].hostname()}")
                 else:
                     continue
 
-            sample, ts = inlet.pull_sample(timeout=0.1)
+            sample, _ts = inlet.pull_sample(timeout=0.1)
             if sample is None:
                 continue
 
@@ -202,14 +215,18 @@ def remote_marker_listener(other_player_id: int):
 
             lvl = int(m.group(1))
             idx = int(m.group(2))
+            # pid = int(m.group(3))  # not needed, but parsed
 
-            # apply only to current level
+            # Only apply to current local level
             if lvl != current_level:
                 continue
+
             with found_lock:
                 if 0 <= idx < len(found) and not found[idx]:
                     found[idx] = True
                     all_done = all(found)
+                else:
+                    all_done = False
 
             print(f"[REMOTE] Applied remote found: level={lvl} id={idx}")
 
@@ -270,9 +287,11 @@ def load_level(outlet, level):
 
     return difference_regions
 
+
 def get_timestamp():
     ts = time.time()
     return datetime.datetime.fromtimestamp(ts)
+
 
 def draw_game():
     screen.fill((220, 220, 220))
@@ -294,6 +313,7 @@ def draw_game():
     )
     screen.blit(text, (50, screen.get_height() - 50))
     pygame.display.flip()
+
 
 def check_click(outlet, pos):
     global current_level
@@ -326,7 +346,9 @@ def check_click(outlet, pos):
                 all_done = all(found)
 
             writer.writerow([timestamp, current_level, gx, gy, True, i])
-            send_marker(outlet, f"CorrectDifference-Level{current_level}-ID{i}")
+
+            # Always send local correct marker (remote will only APPLY it in COOP_MODE)
+            send_marker(outlet, f"CorrectDifference-Level{current_level}-ID{i}-PID{PLAYER_ID}")
 
             if all_done:
                 draw_game()
@@ -338,10 +360,12 @@ def check_click(outlet, pos):
     writer.writerow([timestamp, current_level, gx, gy, False, "wrong"])
     send_marker(outlet, f"WrongClick-Level{current_level}")
 
+
 def force_foreground():
     hwnd = pygame.display.get_wm_info()["window"]
     ctypes.windll.user32.ShowWindow(hwnd, 9)
     ctypes.windll.user32.SetForegroundWindow(hwnd)
+
 
 def wait_for_start_click():
     """
@@ -412,14 +436,17 @@ def wait_for_start_click():
 
 # -------------------- Run --------------------
 
+print("MODE:", "COOP" if COOP_MODE else "SOLO")
+
 force_foreground()
 wait_for_start_click()
 
-# Start remote marker listener after both are ready
-other_id = 2 if PLAYER_ID == 1 else 1
-stop_remote_thread.clear()
-remote_thread = threading.Thread(target=remote_marker_listener, args=(other_id,), daemon=True)
-remote_thread.start()
+# Start remote marker listener ONLY in COOP_MODE
+if COOP_MODE:
+    other_id = 2 if PLAYER_ID == 1 else 1
+    stop_remote_thread.clear()
+    remote_thread = threading.Thread(target=remote_marker_listener, args=(other_id,), daemon=True)
+    remote_thread.start()
 
 current_level = 1
 difference_regions = load_level(market_outlet, current_level)
@@ -432,13 +459,16 @@ send_marker(market_outlet, "GameStart")
 running = True
 while running:
     clock.tick(60)
-    draw_game()    
-    if level_complete_event.is_set():
+    draw_game()
+
+    # Remote-driven level completion ONLY in COOP_MODE
+    if COOP_MODE and level_complete_event.is_set():
         level_complete_event.clear()
         draw_game()
         pygame.time.delay(600)
         current_level += 1
         load_level(market_outlet, current_level)
+
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
