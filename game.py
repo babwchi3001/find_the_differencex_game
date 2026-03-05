@@ -6,7 +6,9 @@ from PIL import Image
 import os
 import datetime
 import ctypes
-from pylsl import StreamInfo, StreamOutlet, StreamInlet, local_clock, resolve_byprop
+import threading
+import re
+from pylsl import StreamInfo, StreamOutlet, StreamInlet, local_clock, resolve_byprop, proc_ALL
 import argparse
 
 pygame.init()
@@ -33,7 +35,6 @@ parser.add_argument(
     default="Simple Images",
     help="Folder containing experiment images"
 )
-# NEW (only for 2-player start): give each device a unique id
 parser.add_argument(
     "--player_id",
     type=int,
@@ -70,11 +71,21 @@ user32.SetProcessDPIAware()
 screen_width_primary = user32.GetSystemMetrics(0)
 screen_height_primary = user32.GetSystemMetrics(1)
 
-# --- START LOGIC FIX: Create LSL outlet FIRST (before display/fullscreen) ---
+# Thread sync primitives
+found_lock = threading.Lock()
+remote_ready_event = threading.Event()
+stop_sync_thread = threading.Event()
+stop_remote_thread = threading.Event()
+sync_thread = None
+remote_thread = None
+
+# --- Marker outlet (unique per player so other device can subscribe) ---
 def create_lsl_marker_stream():
-    info = StreamInfo('GameMarkers', 'Markers', 1, 0, 'string', 'game_marker_stream')
+    marker_name = "GameMarkers"
+    marker_source_id = f"game_markers_p{PLAYER_ID}"
+    info = StreamInfo(marker_name, "Markers", 1, 0, "string", marker_source_id)
     outlet = StreamOutlet(info)
-    print("LSL marker stream created.")
+    print(f"LSL marker stream created: name={marker_name} source_id={marker_source_id}")
     return outlet
 
 def wait_for_labrecorder_connection(outlet, timeout=60):
@@ -91,26 +102,25 @@ def wait_for_labrecorder_connection(outlet, timeout=60):
 
 market_outlet = create_lsl_marker_stream()
 
-# (optional debug) Now the stream exists, so resolve_byprop makes sense:
-print("Looking for my own stream on the network...")
-streams = resolve_byprop('name', 'GameMarkers', timeout=2)
+# (optional debug) Check marker stream discovery on this machine
+print("Looking for marker streams on the network...")
+streams = resolve_byprop("name", "GameMarkers", timeout=2)
 print("Found:", len(streams))
 for s in streams:
-    print(" -", s.name(), s.type(), s.source_id())
+    print(" -", s.name(), s.type(), s.source_id(), s.hostname())
 
 if not wait_for_labrecorder_connection(outlet=market_outlet, timeout=120):
     print("Recorder not connected → exiting.")
     pygame.quit()
     exit()
 
-# --- START LOGIC FIX: set window pos BEFORE set_mode ---
+# --- monitor logic unchanged ---
 monitor_offsets = [(0, 0)]
 if monitor_index > 0:
     monitor_offsets.append((screen_width_primary, 0))
 x_offset, y_offset = monitor_offsets[monitor_index]
 os.environ['SDL_VIDEO_WINDOW_POS'] = f"{x_offset},{y_offset}"
 
-# now create the window (unchanged otherwise)
 screen = pygame.display.set_mode(
     (2560, 1440),
     pygame.FULLSCREEN | pygame.SHOWN, display=0
@@ -118,18 +128,95 @@ screen = pygame.display.set_mode(
 pygame.display.set_caption("Find The Differences")
 
 # -----------------------------------------------------------------------
-# 2-PLAYER START SYNC (GameSync stream)  ✅ BOTH must click START
+# 2-PLAYER START SYNC (GameSync stream)
 # -----------------------------------------------------------------------
 SYNC_NAME = "GameSync"
-sync_info = StreamInfo(SYNC_NAME, "Markers", 1, 0, "string", "game_sync_stream")
+SYNC_SOURCE_ID = f"game_sync_p{PLAYER_ID}"
+sync_info = StreamInfo(SYNC_NAME, "Markers", 1, 0, "string", SYNC_SOURCE_ID)
 sync_outlet = StreamOutlet(sync_info)
 sync_inlet = None
 
-# optional: make it visible immediately
 sync_outlet.push_sample([f"SYNC_ONLINE:{PLAYER_ID}"], local_clock())
-print("LSL sync stream created:", SYNC_NAME)
+print(f"LSL sync stream created: name={SYNC_NAME} source_id={SYNC_SOURCE_ID}")
 
-# --- everything below unchanged except the start screen logic ---
+# -------------------- Threads --------------------
+
+def sync_listener_thread(other_source_id: str, other_ready_msg: str):
+    """
+    Background thread: listens for READY from the other device on GameSync.
+    Sets remote_ready_event when received.
+    """
+    inlet = None
+    while not stop_sync_thread.is_set():
+        try:
+            if inlet is None:
+                streams = resolve_byprop("source_id", other_source_id, timeout=1)
+                if streams:
+                    inlet = StreamInlet(streams[0], processing_flags=proc_ALL)
+                    inlet.open_stream(timeout=2)
+                    print(f"[SYNC-THREAD] Connected to remote sync: source_id={streams[0].source_id()} host={streams[0].hostname()}")
+                else:
+                    continue
+
+            sample, ts = inlet.pull_sample(timeout=0.1)
+            if sample is None:
+                continue
+            msg = sample[0]
+            if msg == other_ready_msg:
+                print(f"[SYNC-THREAD] Remote ready received: {msg}")
+                remote_ready_event.set()
+
+        except Exception as e:
+            print("[SYNC-THREAD] Error:", repr(e))
+            inlet = None
+            time.sleep(0.2)
+
+def remote_marker_listener(other_player_id: int):
+    """
+    Background thread: listens to the other player's GameMarkers stream and updates found[].
+    """
+    other_marker_source_id = f"game_markers_p{other_player_id}"
+    inlet = None
+    pattern = re.compile(r"^CorrectDifference-Level(\d+)-ID(\d+)$")
+
+    while not stop_remote_thread.is_set():
+        try:
+            if inlet is None:
+                streams = resolve_byprop("source_id", other_marker_source_id, timeout=1)
+                if streams:
+                    inlet = StreamInlet(streams[0], processing_flags=proc_ALL)
+                    inlet.open_stream(timeout=2)
+                    print(f"[REMOTE] Connected to other markers: source_id={streams[0].source_id()} host={streams[0].hostname()}")
+                else:
+                    continue
+
+            sample, ts = inlet.pull_sample(timeout=0.1)
+            if sample is None:
+                continue
+
+            msg = sample[0]
+            m = pattern.match(msg)
+            if not m:
+                continue
+
+            lvl = int(m.group(1))
+            idx = int(m.group(2))
+
+            # apply only to current level
+            if lvl != current_level:
+                continue
+
+            with found_lock:
+                if 0 <= idx < len(found) and not found[idx]:
+                    found[idx] = True
+                    print(f"[REMOTE] Applied remote found: level={lvl} id={idx}")
+
+        except Exception as e:
+            print("[REMOTE] Error:", repr(e))
+            inlet = None
+            time.sleep(0.2)
+
+# -------------------- Game logic --------------------
 
 def load_level(outlet, level):
     global left_img, right_img, difference_regions, found
@@ -152,9 +239,9 @@ def load_level(outlet, level):
     W_orig, H_orig = orig_img.size
 
     screen_width, screen_height = pygame.display.get_surface().get_size()
-    IMAGE_SIZE = (int(screen_width*0.4), int(screen_height*0.8))
-    LEFT_POS = (int(screen_width*0.05), int(screen_height*0.1))
-    RIGHT_POS = (int(screen_width*0.55), int(screen_height*0.1))
+    IMAGE_SIZE = (int(screen_width * 0.4), int(screen_height * 0.8))
+    LEFT_POS = (int(screen_width * 0.05), int(screen_height * 0.1))
+    RIGHT_POS = (int(screen_width * 0.55), int(screen_height * 0.1))
 
     left_img_temp = pygame.image.load(left_path)
     right_img_temp = pygame.image.load(right_path)
@@ -169,10 +256,12 @@ def load_level(outlet, level):
     for _, row in df.iterrows():
         x_new = int(row["x_coordinate"] * scale_x)
         y_new = int(row["y_coordinate"] * scale_y)
-        r_new = int(row["radius"] * ((scale_x + scale_y)/2))
+        r_new = int(row["radius"] * ((scale_x + scale_y) / 2))
         difference_regions.append((x_new, y_new, r_new))
 
-    found = [False] * len(difference_regions)
+    with found_lock:
+        found = [False] * len(difference_regions)
+
     return difference_regions
 
 def get_timestamp():
@@ -184,28 +273,31 @@ def draw_game():
     screen.blit(left_img, LEFT_POS)
     screen.blit(right_img, RIGHT_POS)
 
+    with found_lock:
+        found_snapshot = found[:]
+
     for i, (cx, cy, r) in enumerate(difference_regions):
-        if found[i]:
+        if i < len(found_snapshot) and found_snapshot[i]:
             pygame.draw.circle(screen, (0, 255, 0), (LEFT_POS[0] + cx, LEFT_POS[1] + cy), r, 3)
             pygame.draw.circle(screen, (0, 255, 0), (RIGHT_POS[0] + cx, RIGHT_POS[1] + cy), r, 3)
 
     text = font.render(
-        f"Level {current_level}   Found: {sum(found)}/{len(difference_regions)}",
+        f"Level {current_level}   Found: {sum(found_snapshot)}/{len(difference_regions)}",
         True,
         (0, 0, 0)
     )
-    screen.blit(text, (50, screen.get_height()-50))
+    screen.blit(text, (50, screen.get_height() - 50))
     pygame.display.flip()
 
 def check_click(outlet, pos):
-    global current_level, difference_regions, found
+    global current_level
 
     gx, gy = pos
     timestamp = get_timestamp()
 
-    if LEFT_POS[0] <= gx <= LEFT_POS[0]+IMAGE_SIZE[0] and LEFT_POS[1] <= gy <= LEFT_POS[1]+IMAGE_SIZE[1]:
+    if LEFT_POS[0] <= gx <= LEFT_POS[0] + IMAGE_SIZE[0] and LEFT_POS[1] <= gy <= LEFT_POS[1] + IMAGE_SIZE[1]:
         img_offset = LEFT_POS
-    elif RIGHT_POS[0] <= gx <= RIGHT_POS[0]+IMAGE_SIZE[0] and RIGHT_POS[1] <= gy <= RIGHT_POS[1]+IMAGE_SIZE[1]:
+    elif RIGHT_POS[0] <= gx <= RIGHT_POS[0] + IMAGE_SIZE[0] and RIGHT_POS[1] <= gy <= RIGHT_POS[1] + IMAGE_SIZE[1]:
         img_offset = RIGHT_POS
     else:
         writer.writerow([timestamp, current_level, gx, gy, False, "wrong-click"])
@@ -216,18 +308,26 @@ def check_click(outlet, pos):
     ly = gy - img_offset[1]
 
     for i, (cx, cy, r) in enumerate(difference_regions):
-        if not found[i]:
-            dist = ((lx - cx)**2 + (ly - cy)**2)**0.5
-            if dist <= r:
+        with found_lock:
+            already = found[i] if i < len(found) else True
+        if already:
+            continue
+
+        dist = ((lx - cx) ** 2 + (ly - cy) ** 2) ** 0.5
+        if dist <= r:
+            with found_lock:
                 found[i] = True
-                writer.writerow([timestamp, current_level, gx, gy, True, i])
-                send_marker(outlet, f"CorrectDifference-Level{current_level}-ID{i}")
-                if all(found):
-                    draw_game()
-                    pygame.time.delay(600)
-                    current_level += 1
-                    load_level(outlet, current_level)
-                return
+                all_done = all(found)
+
+            writer.writerow([timestamp, current_level, gx, gy, True, i])
+            send_marker(outlet, f"CorrectDifference-Level{current_level}-ID{i}")
+
+            if all_done:
+                draw_game()
+                pygame.time.delay(600)
+                current_level += 1
+                load_level(outlet, current_level)
+            return
 
     writer.writerow([timestamp, current_level, gx, gy, False, "wrong"])
     send_marker(outlet, f"WrongClick-Level{current_level}")
@@ -241,55 +341,57 @@ def wait_for_start_click():
     """
     BOTH devices must press START.
     Local click sends READY:<PLAYER_ID> on GameSync.
-    Remote ready is only accepted if it is READY with the other player's id.
+    Remote ready is detected by background thread.
     """
-    global sync_inlet
+    global sync_thread
 
     button_rect = pygame.Rect(0, 0, 300, 100)
     button_rect.center = screen.get_rect().center
     status_font = pygame.font.SysFont(None, 40)
 
     local_ready = False
-    remote_ready = False
 
     other_id = 2 if PLAYER_ID == 1 else 1
+    other_source_id = f"game_sync_p{other_id}"
+    other_ready_msg = f"READY:{other_id}"
+
+    if sync_thread is None or not sync_thread.is_alive():
+        remote_ready_event.clear()
+        stop_sync_thread.clear()
+        sync_thread = threading.Thread(
+            target=sync_listener_thread,
+            args=(other_source_id, other_ready_msg),
+            daemon=True
+        )
+        sync_thread.start()
 
     while True:
-        # Keep trying to resolve the inlet (other device might start later)
-        if sync_inlet is None:
-            sync_streams = resolve_byprop("name", SYNC_NAME, timeout=1)
-            if sync_streams:
-                sync_inlet = StreamInlet(sync_streams[0])
-
-        # Pull sync messages non-blocking
-        if sync_inlet is not None:
-            sample, _ts = sync_inlet.pull_sample(timeout=0.0)
-            if sample:
-                msg = sample[0]
-                if msg == f"READY:{other_id}":
-                    remote_ready = True
+        remote_ready = remote_ready_event.is_set()
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
+                stop_sync_thread.set()
                 pygame.quit()
                 exit()
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                stop_sync_thread.set()
                 pygame.quit()
                 exit()
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if button_rect.collidepoint(event.pos) and not local_ready:
                     local_ready = True
-                    sync_outlet.push_sample([f"READY:{PLAYER_ID}"], local_clock())
+                    out_msg = f"READY:{PLAYER_ID}"
+                    sync_outlet.push_sample([out_msg], local_clock())
+                    print(f"[SYNC] Sent: {out_msg}")
 
-        # Draw start screen
         screen.fill((30, 30, 30))
         pygame.draw.rect(screen, (0, 120, 0) if local_ready else (0, 200, 0), button_rect)
 
         text = font.render("START", True, (255, 255, 255))
         screen.blit(
             text,
-            (button_rect.centerx - text.get_width()//2,
-             button_rect.centery - text.get_height()//2)
+            (button_rect.centerx - text.get_width() // 2,
+             button_rect.centery - text.get_height() // 2)
         )
 
         status = f"You: {'READY' if local_ready else 'WAIT'}   Other: {'READY' if remote_ready else 'WAIT'}"
@@ -302,8 +404,16 @@ def wait_for_start_click():
 
         clock.tick(60)
 
+# -------------------- Run --------------------
+
 force_foreground()
 wait_for_start_click()
+
+# Start remote marker listener after both are ready
+other_id = 2 if PLAYER_ID == 1 else 1
+stop_remote_thread.clear()
+remote_thread = threading.Thread(target=remote_marker_listener, args=(other_id,), daemon=True)
+remote_thread.start()
 
 current_level = 1
 difference_regions = load_level(market_outlet, current_level)
@@ -326,5 +436,9 @@ while running:
             check_click(market_outlet, pygame.mouse.get_pos())
 
 send_marker(market_outlet, "GameStop")
+
+stop_sync_thread.set()
+stop_remote_thread.set()
+
 pygame.quit()
 logfile.close()
