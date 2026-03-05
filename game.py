@@ -48,8 +48,8 @@ IMAGE_FOLDER = args.image_folder
 PLAYER_ID = args.player_id
 
 # MODE SWITCH:
-# - Coop_Images  -> show/merge remote found circles + STRICT level barrier (no random skips)
-# - Solo_Images  -> no remote circles; if opponent finishes level first, you advance
+# - Coop_Images  -> show remote circles + strict barrier (no random skipping)
+# - Solo_Images  -> no remote circles; opponent finishing forces your advance
 FOLDER_BASE = os.path.basename(os.path.normpath(IMAGE_FOLDER)).lower()
 COOP_MODE = (FOLDER_BASE == "coop_images")
 
@@ -87,10 +87,10 @@ stop_remote_thread = threading.Event()
 sync_thread = None
 remote_thread = None
 
-# --------- NEW: strict level synchronization (prevents random skipping in COOP) ----------
+# --------- strict level synchronization (prevents random skipping in COOP) ----------
 level_sync_lock = threading.Lock()
-local_level_done = set()     # levels finished locally
-remote_level_done = set()    # levels finished by other player
+local_level_done = set()      # levels for which THIS device already sent LevelDone
+remote_level_done = set()     # levels for which OTHER device already sent LevelDone
 advance_request_event = threading.Event()  # main thread checks this to advance
 
 # --- Marker outlet (unique per player so other device can subscribe) ---
@@ -118,7 +118,6 @@ def wait_for_labrecorder_connection(outlet, timeout=60):
 
 market_outlet = create_lsl_marker_stream()
 
-# (optional debug) Check marker stream discovery on this machine
 print("Looking for marker streams on the network...")
 streams = resolve_byprop("name", "GameMarkers", timeout=2)
 print("Found:", len(streams))
@@ -158,10 +157,6 @@ print(f"LSL sync stream created: name={SYNC_NAME} source_id={SYNC_SOURCE_ID}")
 # -------------------- Threads --------------------
 
 def sync_listener_thread(other_source_id: str, other_ready_msg: str):
-    """
-    Background thread: listens for READY from the other device on GameSync.
-    Sets remote_ready_event when received.
-    """
     inlet = None
     while not stop_sync_thread.is_set():
         try:
@@ -187,17 +182,43 @@ def sync_listener_thread(other_source_id: str, other_ready_msg: str):
             time.sleep(0.2)
 
 
-def remote_marker_listener(other_player_id: int):
+def mark_level_complete_if_needed(outlet, level):
+    """
+    Important fix:
+    If OUR local found[] is complete (even due to remote diffs), we must send LevelDone ONCE.
+    COOP: sends LevelDone and waits for remote LevelDone barrier.
+    SOLO: sends LevelDone (optional), but we still advance locally as before (or via opponent).
+    """
+    if COOP_MODE:
+        with level_sync_lock:
+            if level in local_level_done:
+                return
+            local_level_done.add(level)
+
+        send_marker(outlet, f"LevelDone-Level{level}-PID{PLAYER_ID}")
+
+        # If remote already done too, request advance
+        with level_sync_lock:
+            if level in remote_level_done and level == current_level:
+                advance_request_event.set()
+        return
+
+    # SOLO: we can still emit it (harmless), but don't use barrier logic
+    send_marker(outlet, f"LevelDone-Level{level}-PID{PLAYER_ID}")
+
+
+def remote_marker_listener(other_player_id: int, outlet_for_local_marking):
     """
     Listens to the other player's GameMarkers stream.
 
     COOP_MODE:
       - applies remote CorrectDifference markers (circles)
-      - uses strict level barrier: ONLY advance when BOTH sent LevelDone for same level
+      - strict barrier: advance ONLY when BOTH sent LevelDone for same level
+      - FIX: if remote diffs cause our local found[] to become complete, we ALSO send LevelDone
 
-    SOLO mode:
-      - ignores remote CorrectDifference markers (no circles)
-      - if other sends LevelDone-LevelX -> you advance immediately (if you're still on X)
+    SOLO:
+      - ignores remote diffs (no circles)
+      - if other sends LevelDone-LevelX -> you advance (if still on X)
     """
     other_marker_source_id = f"game_markers_p{other_player_id}"
     inlet = None
@@ -222,7 +243,7 @@ def remote_marker_listener(other_player_id: int):
 
             msg = sample[0]
 
-            # 1) Level done message (SOLO + COOP)
+            # LevelDone from opponent (SOLO + COOP)
             m_done = done_pattern.match(msg)
             if m_done:
                 lvl = int(m_done.group(1))
@@ -230,18 +251,16 @@ def remote_marker_listener(other_player_id: int):
                 if COOP_MODE:
                     with level_sync_lock:
                         remote_level_done.add(lvl)
-                        # only request advance if BOTH done AND this is the current level
                         if (lvl == current_level) and (lvl in local_level_done):
                             advance_request_event.set()
                     print(f"[REMOTE] Remote LevelDone received for level {lvl}")
                 else:
-                    # SOLO: only advance if we're still on that level
                     if lvl == current_level:
                         print(f"[REMOTE] Opponent finished level {lvl} (SOLO) -> advancing locally")
                         advance_request_event.set()
                 continue
 
-            # 2) Correct difference message (COOP only)
+            # CorrectDifference (COOP only)
             if not COOP_MODE:
                 continue
 
@@ -255,11 +274,19 @@ def remote_marker_listener(other_player_id: int):
             if lvl != current_level:
                 continue
 
+            became_complete = False
             with found_lock:
                 if 0 <= idx < len(found) and not found[idx]:
                     found[idx] = True
+                    # FIX: if this remote diff completes the level locally, we must send LevelDone once
+                    if all(found):
+                        became_complete = True
 
             print(f"[REMOTE] Applied remote found: level={lvl} id={idx}")
+
+            if became_complete:
+                print(f"[REMOTE] Remote diff completed level {lvl} locally -> sending our LevelDone")
+                mark_level_complete_if_needed(outlet_for_local_marking, lvl)
 
         except Exception as e:
             print("[REMOTE] Error:", repr(e))
@@ -312,7 +339,7 @@ def load_level(outlet, level):
     with found_lock:
         found = [False] * len(difference_regions)
 
-    # COOP: clear any stale advance request
+    # Clear any stale advance request for new level (COOP safety)
     if COOP_MODE:
         advance_request_event.clear()
 
@@ -346,33 +373,9 @@ def draw_game():
     pygame.display.flip()
 
 
-def complete_level_local(outlet):
-    """
-    Called when THIS device completes a level.
-    - Always broadcasts LevelDone.
-    - SOLO: advances immediately.
-    - COOP: waits for other player's LevelDone for same level (strict barrier).
-    """
+def check_click(outlet, pos):
     global current_level
 
-    send_marker(outlet, f"LevelDone-Level{current_level}-PID{PLAYER_ID}")
-
-    if COOP_MODE:
-        with level_sync_lock:
-            local_level_done.add(current_level)
-            if current_level in remote_level_done:
-                advance_request_event.set()
-        # Do NOT advance here (barrier)
-        return
-
-    # SOLO: advance immediately (opponent can also force-advance you)
-    draw_game()
-    pygame.time.delay(600)
-    current_level += 1
-    load_level(outlet, current_level)
-
-
-def check_click(outlet, pos):
     gx, gy = pos
     timestamp = get_timestamp()
 
@@ -402,11 +405,19 @@ def check_click(outlet, pos):
 
             writer.writerow([timestamp, current_level, gx, gy, True, i])
 
-            # broadcast that THIS player found the diff
             send_marker(outlet, f"CorrectDifference-Level{current_level}-ID{i}-PID{PLAYER_ID}")
 
             if all_done:
-                complete_level_local(outlet)
+                # FIX: send LevelDone even in COOP (barrier will handle advancing)
+                mark_level_complete_if_needed(outlet, current_level)
+
+                if not COOP_MODE:
+                    # SOLO: advance immediately on local completion
+                    draw_game()
+                    pygame.time.delay(600)
+                    current_level += 1
+                    load_level(outlet, current_level)
+
             return
 
     writer.writerow([timestamp, current_level, gx, gy, False, "wrong"])
@@ -495,10 +506,14 @@ wait_for_start_click()
 
 # Start remote marker listener in BOTH modes:
 # - SOLO: reacts to LevelDone only (advance), ignores diffs (no circles)
-# - COOP: reacts to diffs + LevelDone barrier
+# - COOP: reacts to diffs + LevelDone barrier + sends local LevelDone if remote completes found[]
 other_id = 2 if PLAYER_ID == 1 else 1
 stop_remote_thread.clear()
-remote_thread = threading.Thread(target=remote_marker_listener, args=(other_id,), daemon=True)
+remote_thread = threading.Thread(
+    target=remote_marker_listener,
+    args=(other_id, market_outlet),
+    daemon=True
+)
 remote_thread.start()
 
 current_level = 1
@@ -517,13 +532,12 @@ while running:
     # ----- Level advance handling -----
     if advance_request_event.is_set():
         if COOP_MODE:
-            # Strict barrier: advance ONLY if both have finished current_level
             with level_sync_lock:
                 lvl = current_level
                 if (lvl in local_level_done) and (lvl in remote_level_done):
                     advance_request_event.clear()
 
-                    # cleanup so duplicates/late packets don't re-trigger
+                    # cleanup to avoid re-trigger from duplicates/late packets
                     local_level_done.discard(lvl)
                     remote_level_done.discard(lvl)
 
