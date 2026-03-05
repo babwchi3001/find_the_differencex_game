@@ -138,6 +138,7 @@ sync_inlet = None
 
 sync_outlet.push_sample([f"SYNC_ONLINE:{PLAYER_ID}"], local_clock())
 print(f"LSL sync stream created: name={SYNC_NAME} source_id={SYNC_SOURCE_ID}")
+level_complete_event = threading.Event()
 
 # -------------------- Threads --------------------
 
@@ -205,11 +206,16 @@ def remote_marker_listener(other_player_id: int):
             # apply only to current level
             if lvl != current_level:
                 continue
-
             with found_lock:
                 if 0 <= idx < len(found) and not found[idx]:
                     found[idx] = True
-                    print(f"[REMOTE] Applied remote found: level={lvl} id={idx}")
+                    all_done = all(found)
+
+            print(f"[REMOTE] Applied remote found: level={lvl} id={idx}")
+
+            if all_done:
+                print(f"[REMOTE] Level complete detected from remote on level {lvl}")
+                level_complete_event.set()
 
         except Exception as e:
             print("[REMOTE] Error:", repr(e))
@@ -426,7 +432,13 @@ send_marker(market_outlet, "GameStart")
 running = True
 while running:
     clock.tick(60)
-    draw_game()
+    draw_game()    
+    if level_complete_event.is_set():
+        level_complete_event.clear()
+        draw_game()
+        pygame.time.delay(600)
+        current_level += 1
+        load_level(market_outlet, current_level)
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
