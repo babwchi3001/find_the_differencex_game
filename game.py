@@ -49,7 +49,8 @@ PLAYER_ID = args.player_id
 
 # MODE SWITCH:
 # - Coop_Images  -> show/merge remote found circles + remote-driven level completion
-# - Solo_Images  -> DO NOT listen to remote markers (no circles, no remote completion)
+# - Solo_Images  -> DO NOT show remote circles, BUT if opponent finishes a level first,
+#                  you automatically advance to next level.
 FOLDER_BASE = os.path.basename(os.path.normpath(IMAGE_FOLDER)).lower()
 COOP_MODE = (FOLDER_BASE == "coop_images")
 
@@ -80,14 +81,16 @@ screen_height_primary = user32.GetSystemMetrics(1)
 # Thread sync primitives
 found_lock = threading.Lock()
 remote_ready_event = threading.Event()
-stop_sync_thread = threading.Event()
-stop_remote_thread = threading.Event()
-sync_thread = None
-remote_thread = None
 level_complete_event = threading.Event()
 
+stop_sync_thread = threading.Event()
+stop_remote_thread = threading.Event()
 
-# --- Marker outlet (unique per player so other device can subscribe in COOP_MODE) ---
+sync_thread = None
+remote_thread = None
+
+
+# --- Marker outlet (unique per player so other device can subscribe) ---
 def create_lsl_marker_stream():
     marker_name = "GameMarkers"
     marker_source_id = f"game_markers_p{PLAYER_ID}"
@@ -145,10 +148,10 @@ SYNC_NAME = "GameSync"
 SYNC_SOURCE_ID = f"game_sync_p{PLAYER_ID}"
 sync_info = StreamInfo(SYNC_NAME, "Markers", 1, 0, "string", SYNC_SOURCE_ID)
 sync_outlet = StreamOutlet(sync_info)
-sync_inlet = None
 
 sync_outlet.push_sample([f"SYNC_ONLINE:{PLAYER_ID}"], local_clock())
 print(f"LSL sync stream created: name={SYNC_NAME} source_id={SYNC_SOURCE_ID}")
+
 
 # -------------------- Threads --------------------
 
@@ -184,14 +187,21 @@ def sync_listener_thread(other_source_id: str, other_ready_msg: str):
 
 def remote_marker_listener(other_player_id: int):
     """
-    COOP MODE ONLY:
-    Listen to the other player's GameMarkers stream and update found[] + level completion.
+    Listens to the other player's GameMarkers stream.
+
+    COOP_MODE:
+      - applies remote CorrectDifference markers (circles)
+      - remote diffs can also complete the level
+
+    SOLO mode:
+      - ignores remote CorrectDifference markers (no circles)
+      - BUT if other player sends LevelDone-LevelX, we jump to next level
     """
     other_marker_source_id = f"game_markers_p{other_player_id}"
     inlet = None
 
-    # Matches: CorrectDifference-Level{lvl}-ID{idx}-PID{pid}
-    pattern = re.compile(r"^CorrectDifference-Level(\d+)-ID(\d+)-PID(\d+)$")
+    diff_pattern = re.compile(r"^CorrectDifference-Level(\d+)-ID(\d+)-PID(\d+)$")
+    done_pattern = re.compile(r"^LevelDone-Level(\d+)-PID(\d+)$")
 
     while not stop_remote_thread.is_set():
         try:
@@ -209,15 +219,27 @@ def remote_marker_listener(other_player_id: int):
                 continue
 
             msg = sample[0]
-            m = pattern.match(msg)
-            if not m:
+
+            # 1) SOLO + COOP: explicit "other finished level" -> advance locally
+            m_done = done_pattern.match(msg)
+            if m_done:
+                lvl = int(m_done.group(1))
+                if lvl == current_level:
+                    print(f"[REMOTE] Opponent finished level {lvl} -> advancing locally")
+                    level_complete_event.set()
                 continue
 
-            lvl = int(m.group(1))
-            idx = int(m.group(2))
-            # pid = int(m.group(3))  # not needed, but parsed
+            # 2) COOP only: apply remote diffs (circles) and remote completion by diffs
+            if not COOP_MODE:
+                continue
 
-            # Only apply to current local level
+            m_diff = diff_pattern.match(msg)
+            if not m_diff:
+                continue
+
+            lvl = int(m_diff.group(1))
+            idx = int(m_diff.group(2))
+
             if lvl != current_level:
                 continue
 
@@ -347,10 +369,13 @@ def check_click(outlet, pos):
 
             writer.writerow([timestamp, current_level, gx, gy, True, i])
 
-            # Always send local correct marker (remote will only APPLY it in COOP_MODE)
+            # always broadcast that THIS player found the diff
             send_marker(outlet, f"CorrectDifference-Level{current_level}-ID{i}-PID{PLAYER_ID}")
 
             if all_done:
+                # NEW: explicitly broadcast that THIS player completed the level
+                send_marker(outlet, f"LevelDone-Level{current_level}-PID{PLAYER_ID}")
+
                 draw_game()
                 pygame.time.delay(600)
                 current_level += 1
@@ -441,12 +466,13 @@ print("MODE:", "COOP" if COOP_MODE else "SOLO")
 force_foreground()
 wait_for_start_click()
 
-# Start remote marker listener ONLY in COOP_MODE
-if COOP_MODE:
-    other_id = 2 if PLAYER_ID == 1 else 1
-    stop_remote_thread.clear()
-    remote_thread = threading.Thread(target=remote_marker_listener, args=(other_id,), daemon=True)
-    remote_thread.start()
+# Start remote marker listener in BOTH modes:
+# - SOLO: will ONLY react to LevelDone (advance) and ignore diffs (no circles)
+# - COOP: will react to diffs + LevelDone
+other_id = 2 if PLAYER_ID == 1 else 1
+stop_remote_thread.clear()
+remote_thread = threading.Thread(target=remote_marker_listener, args=(other_id,), daemon=True)
+remote_thread.start()
 
 current_level = 1
 difference_regions = load_level(market_outlet, current_level)
@@ -461,8 +487,8 @@ while running:
     clock.tick(60)
     draw_game()
 
-    # Remote-driven level completion ONLY in COOP_MODE
-    if COOP_MODE and level_complete_event.is_set():
+    # Advance if opponent finished level (SOLO or COOP) or COOP remote completion detected
+    if level_complete_event.is_set():
         level_complete_event.clear()
         draw_game()
         pygame.time.delay(600)
