@@ -287,6 +287,7 @@ def remote_marker_listener(other_player_id: int, outlet_for_local_marking):
             if became_complete:
                 print(f"[REMOTE] Remote diff completed level {lvl} locally -> sending our LevelDone")
                 mark_level_complete_if_needed(outlet_for_local_marking, lvl)
+                time.sleep(2)
 
         except Exception as e:
             print("[REMOTE] Error:", repr(e))
@@ -385,7 +386,6 @@ def check_click(outlet, pos):
         img_offset = RIGHT_POS
     else:
         writer.writerow([timestamp, current_level, gx, gy, False, "wrong-click"])
-        send_marker(outlet, f"WrongClick-Level{current_level}")
         return
 
     lx = gx - img_offset[0]
@@ -410,6 +410,7 @@ def check_click(outlet, pos):
             if all_done:
                 # FIX: send LevelDone even in COOP (barrier will handle advancing)
                 mark_level_complete_if_needed(outlet, current_level)
+                time.sleep(2)
 
                 if not COOP_MODE:
                     # SOLO: advance immediately on local completion
@@ -421,7 +422,6 @@ def check_click(outlet, pos):
             return
 
     writer.writerow([timestamp, current_level, gx, gy, False, "wrong"])
-    send_marker(outlet, f"WrongClick-Level{current_level}")
 
 
 def force_foreground():
@@ -522,8 +522,6 @@ logfile = open("click_log.csv", "w", newline="")
 writer = csv.writer(logfile)
 writer.writerow(["timestamp", "level", "global_x", "global_y", "correct", "difference_id"])
 
-send_marker(market_outlet, "GameStart")
-
 running = True
 while running:
     clock.tick(60)
@@ -562,8 +560,6 @@ while running:
             running = False
         elif event.type == pygame.MOUSEBUTTONDOWN:
             check_click(market_outlet, pygame.mouse.get_pos())
-
-send_marker(market_outlet, "GameStop")
 
 stop_sync_thread.set()
 stop_remote_thread.set()
