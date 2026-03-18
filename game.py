@@ -17,15 +17,38 @@ pygame.font.init()
 last_lsl_ts = 0
 MIN_SPACING = 0.0001
 
+marker_lock = threading.Lock()
+current_level_lock = threading.Lock()
+draw_state_lock = threading.Lock()
+
+
+def get_current_level():
+    with current_level_lock:
+        return current_level
+
+
+def set_current_level(value):
+    global current_level
+    with current_level_lock:
+        current_level = value
+
+
+def inc_current_level():
+    global current_level
+    with current_level_lock:
+        current_level += 1
+        return current_level
+
 
 def send_marker(outlet, message):
     global last_lsl_ts
-    ts = local_clock()
-    if ts <= last_lsl_ts:
-        ts = last_lsl_ts + MIN_SPACING
-    last_lsl_ts = ts
-    outlet.push_sample([message], ts)
-    print(f"[LSL] {message} at {ts:.4f}")
+    with marker_lock:
+        ts = local_clock()
+        if ts <= last_lsl_ts:
+            ts = last_lsl_ts + MIN_SPACING
+        last_lsl_ts = ts
+        outlet.push_sample([message], ts)
+        print(f"[LSL] {message} at {ts:.4f}")
 
 
 parser = argparse.ArgumentParser(description="Find-the-differences experiment")
@@ -46,10 +69,6 @@ parser.add_argument(
 args = parser.parse_args()
 IMAGE_FOLDER = args.image_folder
 PLAYER_ID = args.player_id
-
-# MODE SWITCH:
-# - Coop_Images  -> show remote circles + strict barrier (no random skipping)
-# - Solo_Images  -> no remote circles; opponent finishing forces your advance
 FOLDER_BASE = os.path.basename(os.path.normpath(IMAGE_FOLDER)).lower()
 COOP_MODE = (FOLDER_BASE == "coop_images")
 
@@ -77,7 +96,6 @@ user32.SetProcessDPIAware()
 screen_width_primary = user32.GetSystemMetrics(0)
 screen_height_primary = user32.GetSystemMetrics(1)
 
-# Thread sync primitives
 found_lock = threading.Lock()
 remote_ready_event = threading.Event()
 
@@ -87,13 +105,11 @@ stop_remote_thread = threading.Event()
 sync_thread = None
 remote_thread = None
 
-# --------- strict level synchronization (prevents random skipping in COOP) ----------
 level_sync_lock = threading.Lock()
-local_level_done = set()      # levels for which THIS device already sent LevelDone
-remote_level_done = set()     # levels for which OTHER device already sent LevelDone
-advance_request_event = threading.Event()  # main thread checks this to advance
+local_level_done = set()
+remote_level_done = set()
+advance_request_event = threading.Event()
 
-# --- Marker outlet (unique per player so other device can subscribe) ---
 def create_lsl_marker_stream():
     marker_name = "GameMarkers"
     marker_source_id = f"game_markers_p{PLAYER_ID}"
@@ -129,7 +145,6 @@ if not wait_for_labrecorder_connection(outlet=market_outlet, timeout=120):
     pygame.quit()
     exit()
 
-# --- monitor logic unchanged ---
 monitor_offsets = [(0, 0)]
 if monitor_index > 0:
     monitor_offsets.append((screen_width_primary, 0))
@@ -143,9 +158,6 @@ screen = pygame.display.set_mode(
 )
 pygame.display.set_caption("Find The Differences")
 
-# -----------------------------------------------------------------------
-# 2-PLAYER START SYNC (GameSync stream)
-# -----------------------------------------------------------------------
 SYNC_NAME = "GameSync"
 SYNC_SOURCE_ID = f"game_sync_p{PLAYER_ID}"
 sync_info = StreamInfo(SYNC_NAME, "Markers", 1, 0, "string", SYNC_SOURCE_ID)
@@ -154,7 +166,6 @@ sync_outlet = StreamOutlet(sync_info)
 sync_outlet.push_sample([f"SYNC_ONLINE:{PLAYER_ID}"], local_clock())
 print(f"LSL sync stream created: name={SYNC_NAME} source_id={SYNC_SOURCE_ID}")
 
-# -------------------- Threads --------------------
 
 def sync_listener_thread(other_source_id: str, other_ready_msg: str):
     inlet = None
@@ -183,12 +194,6 @@ def sync_listener_thread(other_source_id: str, other_ready_msg: str):
 
 
 def mark_level_complete_if_needed(outlet, level):
-    """
-    Important fix:
-    If OUR local found[] is complete (even due to remote diffs), we must send LevelDone ONCE.
-    COOP: sends LevelDone and waits for remote LevelDone barrier.
-    SOLO: sends LevelDone (optional), but we still advance locally as before (or via opponent).
-    """
     if COOP_MODE:
         with level_sync_lock:
             if level in local_level_done:
@@ -197,29 +202,16 @@ def mark_level_complete_if_needed(outlet, level):
 
         send_marker(outlet, f"LevelDone-Level{level}-PID{PLAYER_ID}")
 
-        # If remote already done too, request advance
+        current_level_snapshot = get_current_level()
         with level_sync_lock:
-            if level in remote_level_done and level == current_level:
+            if level in remote_level_done and level == current_level_snapshot:
                 advance_request_event.set()
         return
 
-    # SOLO: we can still emit it (harmless), but don't use barrier logic
     send_marker(outlet, f"LevelDone-Level{level}-PID{PLAYER_ID}")
 
 
 def remote_marker_listener(other_player_id: int, outlet_for_local_marking):
-    """
-    Listens to the other player's GameMarkers stream.
-
-    COOP_MODE:
-      - applies remote CorrectDifference markers (circles)
-      - strict barrier: advance ONLY when BOTH sent LevelDone for same level
-      - FIX: if remote diffs cause our local found[] to become complete, we ALSO send LevelDone
-
-    SOLO:
-      - ignores remote diffs (no circles)
-      - if other sends LevelDone-LevelX -> you advance (if still on X)
-    """
     other_marker_source_id = f"game_markers_p{other_player_id}"
     inlet = None
 
@@ -243,24 +235,24 @@ def remote_marker_listener(other_player_id: int, outlet_for_local_marking):
 
             msg = sample[0]
 
-            # LevelDone from opponent (SOLO + COOP)
             m_done = done_pattern.match(msg)
             if m_done:
                 lvl = int(m_done.group(1))
 
                 if COOP_MODE:
+                    current_level_snapshot = get_current_level()
                     with level_sync_lock:
                         remote_level_done.add(lvl)
-                        if (lvl == current_level) and (lvl in local_level_done):
+                        if (lvl == current_level_snapshot) and (lvl in local_level_done):
                             advance_request_event.set()
                     print(f"[REMOTE] Remote LevelDone received for level {lvl}")
                 else:
-                    if lvl == current_level:
+                    current_level_snapshot = get_current_level()
+                    if lvl == current_level_snapshot:
                         print(f"[REMOTE] Opponent finished level {lvl} (SOLO) -> advancing locally")
                         advance_request_event.set()
                 continue
 
-            # CorrectDifference (COOP only)
             if not COOP_MODE:
                 continue
 
@@ -271,14 +263,14 @@ def remote_marker_listener(other_player_id: int, outlet_for_local_marking):
             lvl = int(m_diff.group(1))
             idx = int(m_diff.group(2))
 
-            if lvl != current_level:
+            current_level_snapshot = get_current_level()
+            if lvl != current_level_snapshot:
                 continue
 
             became_complete = False
             with found_lock:
                 if 0 <= idx < len(found) and not found[idx]:
                     found[idx] = True
-                    # FIX: if this remote diff completes the level locally, we must send LevelDone once
                     if all(found):
                         became_complete = True
 
@@ -287,21 +279,16 @@ def remote_marker_listener(other_player_id: int, outlet_for_local_marking):
             if became_complete:
                 print(f"[REMOTE] Remote diff completed level {lvl} locally -> sending our LevelDone")
                 mark_level_complete_if_needed(outlet_for_local_marking, lvl)
-                time.sleep(2)
 
         except Exception as e:
             print("[REMOTE] Error:", repr(e))
             inlet = None
             time.sleep(0.2)
 
-# -------------------- Game logic --------------------
 
 def load_level(outlet, level):
     global left_img, right_img, difference_regions, found
     global LEFT_POS, RIGHT_POS, IMAGE_SIZE
-
-    print(f"\n--- Loading level {level} ---")
-    send_marker(outlet, f"LevelStart-{level}")
 
     left_path = f"{IMAGE_FOLDER}/{level} Left.png"
     right_path = f"{IMAGE_FOLDER}/{level} Right.png"
@@ -309,9 +296,12 @@ def load_level(outlet, level):
 
     if not os.path.exists(left_path):
         print("No more levels. Game finished.")
-        send_marker(outlet, "GameFinished")
         pygame.quit()
         exit()
+
+    print(f"\n--- Loading level {level} ---")
+    send_marker(outlet, f"LevelStart-{level}")
+
 
     orig_img = Image.open(left_path)
     W_orig, H_orig = orig_img.size
@@ -330,21 +320,23 @@ def load_level(outlet, level):
     scale_x = IMAGE_SIZE[0] / int(W_orig)
     scale_y = IMAGE_SIZE[1] / int(H_orig)
 
-    difference_regions = []
+    new_difference_regions = []
     for _, row in df.iterrows():
         x_new = int(row["x_coordinate"] * scale_x)
         y_new = int(row["y_coordinate"] * scale_y)
         r_new = int(row["radius"] * ((scale_x + scale_y) / 2))
-        difference_regions.append((x_new, y_new, r_new))
+        new_difference_regions.append((x_new, y_new, r_new))
+
+    with draw_state_lock:
+        difference_regions = new_difference_regions
 
     with found_lock:
-        found = [False] * len(difference_regions)
+        found = [False] * len(new_difference_regions)
 
-    # Clear any stale advance request for new level (COOP safety)
     if COOP_MODE:
         advance_request_event.clear()
 
-    return difference_regions
+    return new_difference_regions
 
 
 def get_timestamp():
@@ -353,20 +345,29 @@ def get_timestamp():
 
 
 def draw_game():
+    with draw_state_lock:
+        left_img_snapshot = left_img
+        right_img_snapshot = right_img
+        left_pos_snapshot = LEFT_POS
+        right_pos_snapshot = RIGHT_POS
+        image_size_snapshot = IMAGE_SIZE
+        difference_regions_snapshot = difference_regions[:]
+
     screen.fill((220, 220, 220))
-    screen.blit(left_img, LEFT_POS)
-    screen.blit(right_img, RIGHT_POS)
+    screen.blit(left_img_snapshot, left_pos_snapshot)
+    screen.blit(right_img_snapshot, right_pos_snapshot)
 
     with found_lock:
         found_snapshot = found[:]
 
-    for i, (cx, cy, r) in enumerate(difference_regions):
+    for i, (cx, cy, r) in enumerate(difference_regions_snapshot):
         if i < len(found_snapshot) and found_snapshot[i]:
-            pygame.draw.circle(screen, (0, 255, 0), (LEFT_POS[0] + cx, LEFT_POS[1] + cy), r, 3)
-            pygame.draw.circle(screen, (0, 255, 0), (RIGHT_POS[0] + cx, RIGHT_POS[1] + cy), r, 3)
+            pygame.draw.circle(screen, (0, 255, 0), (left_pos_snapshot[0] + cx, left_pos_snapshot[1] + cy), r, 3)
+            pygame.draw.circle(screen, (0, 255, 0), (right_pos_snapshot[0] + cx, right_pos_snapshot[1] + cy), r, 3)
 
+    current_level_snapshot = get_current_level()
     text = font.render(
-        f"Level {current_level}   Found: {sum(found_snapshot)}/{len(difference_regions)}",
+        f"Level {current_level_snapshot}   Found: {sum(found_snapshot)}/{len(difference_regions_snapshot)}",
         True,
         (0, 0, 0)
     )
@@ -375,23 +376,28 @@ def draw_game():
 
 
 def check_click(outlet, pos):
-    global current_level
-
     gx, gy = pos
     timestamp = get_timestamp()
+    current_level_snapshot = get_current_level()
 
-    if LEFT_POS[0] <= gx <= LEFT_POS[0] + IMAGE_SIZE[0] and LEFT_POS[1] <= gy <= LEFT_POS[1] + IMAGE_SIZE[1]:
-        img_offset = LEFT_POS
-    elif RIGHT_POS[0] <= gx <= RIGHT_POS[0] + IMAGE_SIZE[0] and RIGHT_POS[1] <= gy <= RIGHT_POS[1] + IMAGE_SIZE[1]:
-        img_offset = RIGHT_POS
+    with draw_state_lock:
+        left_pos_snapshot = LEFT_POS
+        right_pos_snapshot = RIGHT_POS
+        image_size_snapshot = IMAGE_SIZE
+        difference_regions_snapshot = difference_regions[:]
+
+    if left_pos_snapshot[0] <= gx <= left_pos_snapshot[0] + image_size_snapshot[0] and left_pos_snapshot[1] <= gy <= left_pos_snapshot[1] + image_size_snapshot[1]:
+        img_offset = left_pos_snapshot
+    elif right_pos_snapshot[0] <= gx <= right_pos_snapshot[0] + image_size_snapshot[0] and right_pos_snapshot[1] <= gy <= right_pos_snapshot[1] + image_size_snapshot[1]:
+        img_offset = right_pos_snapshot
     else:
-        writer.writerow([timestamp, current_level, gx, gy, False, "wrong-click"])
+        writer.writerow([timestamp, current_level_snapshot, gx, gy, False, "wrong-click"])
         return
 
     lx = gx - img_offset[0]
     ly = gy - img_offset[1]
 
-    for i, (cx, cy, r) in enumerate(difference_regions):
+    for i, (cx, cy, r) in enumerate(difference_regions_snapshot):
         with found_lock:
             already = found[i] if i < len(found) else True
         if already:
@@ -400,28 +406,27 @@ def check_click(outlet, pos):
         dist = ((lx - cx) ** 2 + (ly - cy) ** 2) ** 0.5
         if dist <= r:
             with found_lock:
+                if i >= len(found):
+                    return
                 found[i] = True
                 all_done = all(found)
 
-            writer.writerow([timestamp, current_level, gx, gy, True, i])
+            writer.writerow([timestamp, current_level_snapshot, gx, gy, True, i])
 
-            send_marker(outlet, f"CorrectDifference-Level{current_level}-ID{i}-PID{PLAYER_ID}")
+            send_marker(outlet, f"CorrectDifference-Level{current_level_snapshot}-ID{i}-PID{PLAYER_ID}")
 
             if all_done:
-                # FIX: send LevelDone even in COOP (barrier will handle advancing)
-                mark_level_complete_if_needed(outlet, current_level)
-                time.sleep(2)
+                mark_level_complete_if_needed(outlet, current_level_snapshot)
 
                 if not COOP_MODE:
-                    # SOLO: advance immediately on local completion
                     draw_game()
                     pygame.time.delay(600)
-                    current_level += 1
-                    load_level(outlet, current_level)
+                    next_level = inc_current_level()
+                    load_level(outlet, next_level)
 
             return
 
-    writer.writerow([timestamp, current_level, gx, gy, False, "wrong"])
+    writer.writerow([timestamp, current_level_snapshot, gx, gy, False, "wrong"])
 
 
 def force_foreground():
@@ -431,11 +436,6 @@ def force_foreground():
 
 
 def wait_for_start_click():
-    """
-    BOTH devices must press START.
-    Local click sends READY:<PLAYER_ID> on GameSync.
-    Remote ready is detected by background thread.
-    """
     global sync_thread
 
     button_rect = pygame.Rect(0, 0, 300, 100)
@@ -497,16 +497,12 @@ def wait_for_start_click():
 
         clock.tick(60)
 
-# -------------------- Run --------------------
 
 print("MODE:", "COOP" if COOP_MODE else "SOLO")
 
 force_foreground()
 wait_for_start_click()
 
-# Start remote marker listener in BOTH modes:
-# - SOLO: reacts to LevelDone only (advance), ignores diffs (no circles)
-# - COOP: reacts to diffs + LevelDone barrier + sends local LevelDone if remote completes found[]
 other_id = 2 if PLAYER_ID == 1 else 1
 stop_remote_thread.clear()
 remote_thread = threading.Thread(
@@ -516,8 +512,8 @@ remote_thread = threading.Thread(
 )
 remote_thread.start()
 
-current_level = 1
-difference_regions = load_level(market_outlet, current_level)
+set_current_level(1)
+difference_regions = load_level(market_outlet, get_current_level())
 logfile = open("click_log.csv", "w", newline="")
 writer = csv.writer(logfile)
 writer.writerow(["timestamp", "level", "global_x", "global_y", "correct", "difference_id"])
@@ -527,31 +523,28 @@ while running:
     clock.tick(60)
     draw_game()
 
-    # ----- Level advance handling -----
     if advance_request_event.is_set():
         if COOP_MODE:
             with level_sync_lock:
-                lvl = current_level
+                lvl = get_current_level()
                 if (lvl in local_level_done) and (lvl in remote_level_done):
                     advance_request_event.clear()
 
-                    # cleanup to avoid re-trigger from duplicates/late packets
                     local_level_done.discard(lvl)
                     remote_level_done.discard(lvl)
 
                     draw_game()
                     pygame.time.delay(600)
-                    current_level += 1
-                    load_level(market_outlet, current_level)
+                    next_level = inc_current_level()
+                    load_level(market_outlet, next_level)
                 else:
                     advance_request_event.clear()
         else:
-            # SOLO: opponent finished current level -> advance immediately
             advance_request_event.clear()
             draw_game()
             pygame.time.delay(600)
-            current_level += 1
-            load_level(market_outlet, current_level)
+            next_level = inc_current_level()
+            load_level(market_outlet, next_level)
 
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
